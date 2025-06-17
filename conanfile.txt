@@ -1,0 +1,13 @@
+[requires]
+uwebsockets/20.71.0
+libpqxx/7.10.1
+nlohmann_json/3.11.3
+jwt-cpp/0.6.0
+
+[generators]
+CMakeToolchain
+CMakeDeps
+
+[options]
+uwebsockets/*:shared=True
+libpqxx/*:shared=True

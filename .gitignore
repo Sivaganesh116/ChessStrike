@@ -1,0 +1,4 @@
+.vscode
+build/
+chess_strike
+CMakeUserPresets.json

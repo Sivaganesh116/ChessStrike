@@ -65,6 +65,8 @@ public:
         else 
             m_pBoard->promote(move[4], sMove);
 
+        // printBoard();
+
         return m_pBoard->getGameResult();
     }   
 
@@ -106,6 +108,19 @@ public:
 
     std::vector<std::vector<char>> getBoard() {
         return m_pBoard->getBoard();
+    }
+
+    void printBoard() {
+        auto board = m_pBoard->getBoard();
+
+        std::cout << std::endl;
+        for(auto row : board) {
+            for(auto c : row) {
+                std::cout << c << " ";
+            }
+            std::cout << std::endl;
+        }
+        std::cout << std::endl;
     }
 
 

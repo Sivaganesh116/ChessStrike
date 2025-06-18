@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Random Chess Game</title>
+  <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css" crossorigin="anonymous" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .chess-board .square-55d63 { transition: background-color 0.1s ease-in-out; }
+    .promotion-piece {
+        font-size: 2rem;
+        padding: 0.5rem 1rem;
+        background-color: #1f2937;
+        border: 2px solid #4b5563;
+        border-radius: 0.5rem;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    .promotion-piece:hover {
+        background-color: #374151;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+  <div id="game-container" class="w-full max-w-lg mx-auto text-center">
+    <h1 class="text-4xl font-bold mb-4">Random Chess</h1>
+    <div id="status-container" class="mb-4 h-12 flex items-center justify-center">
+      <p id="status" class="text-xl text-gray-400">Welcome! Click below to find a match.</p>
+    </div>
+    <div id="board" class="mx-auto" style="max-width: 60vw; margin: auto;"></div>
+    <button id="findMatchBtn" class="mt-6 px-8 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-opacity-50">
+      Find Match
+    </button>
+    <div id="resultModal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center hidden">
+      <div class="bg-gray-800 rounded-lg p-8 shadow-2xl text-center">
+        <h2 id="resultTitle" class="text-3xl font-bold mb-2"></h2>
+        <p id="resultReason" class="text-lg text-gray-300"></p>
+        <button id="playAgainBtn" class="mt-6 px-6 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg">Play Again</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="promotionDialog" class="fixed inset-0 bg-black bg-opacity-70 hidden items-center justify-center z-50">
+    <div class="bg-gray-800 p-6 rounded-xl text-white flex gap-4">
+        <button data-piece="q" class="promotion-piece">♕</button>
+        <button data-piece="r" class="promotion-piece">♖</button>
+        <button data-piece="b" class="promotion-piece">♗</button>
+        <button data-piece="n" class="promotion-piece">♘</button>
+    </div>
+  </div>
+
+
+  <script src="https://code.jquery.com/jquery-3.5.1.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js" crossorigin="anonymous"></script>
+
+  <script type="module">
+    $(window).on('resize', resizeBoard);
+
+    let board = null, socket = null, playerColor = null, isMyTurn = false, currentFEN = 'start';
+    let selectedSquare = null;
+    let promotionPending = false;
+    let castlePending = false;
+    let enPassantPending = false;
+    let lastMoveUCI = '';
+    let gameOver = false;
+
+
+    const statusEl = $('#status'),
+            findMatchBtn = $('#findMatchBtn'),
+            boardEl = $('#board'),
+            resultModal = $('#resultModal'),
+            resultTitle = $('#resultTitle'),
+            resultReason = $('#resultReason'),
+            playAgainBtn = $('#playAgainBtn');
+
+    function resizeBoard() {
+        const size = Math.min(window.innerWidth * 0.6, window.innerHeight * 0.6);
+        $('#board').css('width', `${size}px`);
+        $('#board').css('height', `${size}px`);
+        if (board) board.resize();
+    }
+
+    
+    function findMatch() {
+        const WEBSOCKET_URL = '';
+        statusEl.text('Connecting to server...');
+        findMatchBtn.prop('disabled', true).addClass('opacity-50 cursor-not-allowed');
+        socket = new WebSocket(WEBSOCKET_URL);
+
+        socket.onopen = () => {
+            console.log('WebSocket connection established.');
+            statusEl.text('Searching for an opponent...');
+        };
+
+        socket.onmessage = handleServerMessage;
+
+        socket.onclose = () => {
+            console.log('WebSocket connection closed.');
+            if(gameOver) return;
+            statusEl.text('Connection lost. Please refresh.');
+            isMyTurn = false;
+            findMatchBtn.prop('disabled', false).removeClass('opacity-50 cursor-not-allowed');
+            if (board) board.destroy();
+        };
+
+        socket.onerror = error => {
+        console.error('WebSocket Error:', error);
+        statusEl.text('Could not connect to the server.');
+        findMatchBtn.prop('disabled', false).removeClass('opacity-50 cursor-not-allowed');
+        };
+    }
+
+    function handleServerMessage(event) {
+        console.log('Received from server:', event.data);
+        let msg;
+        try {
+            msg = JSON.parse(event.data);
+        } catch (e) {
+        if (event.data.startsWith('newmove:')) {
+            const position = board.position();
+            const uciMove = event.data.substring(8);
+            const from = uciMove.substring(0, 2);
+            const to = uciMove.substring(2, 4);
+            
+            if (from === 'e1' && to === 'g1') {
+                board.move('e1-g1', 'h1-f1');
+            } else if (from === 'e1' && to === 'c1') {
+                board.move('e1-c1', 'a1-d1');
+            } else if (from === 'e8' && to === 'g8') {
+                board.move('e8-g8', 'h8-f8');
+            } else if (from === 'e8' && to === 'c8') {
+                board.move('e8-c8', 'a8-d8');
+            }
+            else {
+                const newPiece = uciMove.length == 5 ? uciMove[4] : position[from];
+
+                position[to] = newPiece;
+                delete position[from];
+
+                board.position(position, true);
+            }
+
+            currentFEN = board.fen();
+            isMyTurn = true;
+            updateTurnStatus();
+        } else if (event.data === 'move:true') {
+            console.log("Move verified");
+            applyMoveWithSpecialRules(lastMoveUCI, {
+                promotion: promotionPending,
+                castle: castlePending,
+                enPassant: enPassantPending
+            });
+
+            currentFEN = board.fen();
+            isMyTurn = false;
+            updateTurnStatus();
+        } else if (event.data === 'move:false') {
+            board.position(currentFEN, false);
+            isMyTurn = true;
+            statusEl.text('Invalid move! Try again.');
+        } else if (event.data.startsWith('Error:')) {
+            console.log(event.data);
+        }
+        return;
+        }
+
+        switch (msg.type) {
+        case 'start-game':
+            playerColor = msg.white ? 'white' : 'black';
+            isMyTurn = msg.white;
+            gameOver = false;
+            startGame();
+            console.log("My turn: ", isMyTurn);
+            console.log("My color: ", playerColor);
+            break;
+        case 'result':
+            isMyTurn = false;
+            gameOver = true;
+            showResult(msg.result, msg.reason);
+            socket.close();
+            break;
+        default:
+            console.warn('Unknown message type:', msg.type);
+        }
+    }
+
+    function startGame() {
+        findMatchBtn.hide();
+        resizeBoard();
+        board = Chessboard('board', {
+        draggable: true,
+        position: 'start',
+        orientation: playerColor,
+        pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+        movseSpeed: "fast",
+        snapSpeed: "fast",
+        snapbackSpeed: "fast",
+        trashSpeed: "fast",
+        appearSpeed: "fast",
+        showErrors: "console",
+        onDragStart,
+        onDrop
+        });
+        currentFEN = 'start';
+        updateTurnStatus();
+        $(window).resize(board.resize);
+    }
+
+    let pendingPromotion = null;
+
+    function showPromotionDialog(source, target) {
+        console.log("Shor promotion dialogue");
+        pendingPromotion = { source, target };
+        $('#promotionDialog').removeClass('hidden flex').addClass('flex');
+    }
+
+    $('.promotion-piece').on('click', function () {
+        const piece = $(this).data('piece');
+        const { source, target } = pendingPromotion;
+        lastMoveUCI = `${source}${target}${piece}`;
+        const move =  "move " + lastMoveUCI;
+        socket.send(move);
+        isMyTurn = false;
+        statusEl.text('Verifying promotion...');
+        $('#promotionDialog').addClass('hidden').removeClass('flex');
+        pendingPromotion = null;
+    });
+
+
+    function updateTurnStatus() {
+        statusEl.text(isMyTurn ? "Your turn to move." : "Waiting for opponent's move...");
+    }
+
+    function showResult(result, reason) {
+        const title = result === 'win' ? 'You Won!' : 'You Lost!';
+        resultTitle.text(title).removeClass('text-green-400 text-red-400').addClass(result === 'win' ? 'text-green-400' : 'text-red-400');
+        resultReason.text(`Reason: ${reason}`);
+        resultModal.removeClass('hidden');
+    }
+
+    function onDragStart(source, piece) {
+        if (!isMyTurn) return false;
+        const isWhitePiece = piece.startsWith('w');
+        if ((playerColor === 'white' && !isWhitePiece) || (playerColor === 'black' && isWhitePiece)) return false;
+    }
+
+    function onDrop(source, target) {
+        if (source === target) {
+            /*board.position(currentFEN);*/
+            return;
+        }
+
+        const position = board.position();
+        const piece = position[source];
+        const isPawn = piece && piece[1].toLowerCase() === 'p';
+        const isWhite = piece && piece[0] === 'w';
+        const direction = isWhite ? 1 : -1;
+
+        const isPromotionRank = (playerColor === 'white' && target[1] === '8') || (playerColor === 'black' && target[1] === '1');
+
+        if (isPawn && isPromotionRank) {
+            promotionPending = true;
+            showPromotionDialog(source, target);
+            return;
+        }
+
+
+        if (isPawn) {
+            const dx = Math.abs(fromCharCode(source[0]) - fromCharCode(target[0]));
+            const dy = parseInt(target[1]) - parseInt(source[1]);
+            const sourceRank = parseInt(source[1]);
+            const targetEmpty = !position[target];
+
+            const isCorrectRank = (playerColor === 'white' && sourceRank === 5) || (playerColor === 'black' && sourceRank === 4);
+
+            if (dx === 1 && dy === direction && targetEmpty && isCorrectRank) {
+                enPassantPending = true;
+            }
+        }
+        
+        else if (piece && piece[1].toLowerCase() === 'k') {
+            console.log("castling detected");
+            if ((source === 'e1' && (target === 'g1' || target === 'c1')) || (source === 'e8' && (target === 'g8' || target === 'c8'))) {
+                castlePending = true;
+            }
+        }
+
+        lastMoveUCI = `${source}${target}`;
+        const move = 'move ' + `${source}${target}`;
+        console.log(`Sending move: ${move}`);
+        socket.send(move);
+        statusEl.text('Verifying move with server...');
+        
+    }
+
+    /*
+    boardEl.on('click', '.square-55d63', function () {
+        if (!isMyTurn) return;
+
+        const square = $(this).attr('data-square');
+
+        if (!selectedSquare) {
+            selectedSquare = square;
+            highlightSquare(square);
+        } else {
+            if (selectedSquare === square) {
+                selectedSquare = null;
+                clearHighlights();
+                return;
+            }
+            const move = `${selectedSquare}${square}`;
+            board.move(move);
+            socket.send(move);
+            isMyTurn = false;
+            statusEl.text('Verifying move with server...');
+            clearHighlights();
+            selectedSquare = null;
+        }
+    });
+    */
+
+    function highlightSquare(square) {
+        $(`[data-square="${square}"]`).addClass('bg-yellow-400 bg-opacity-50');
+    }
+
+    function clearHighlights() {
+        $('.square-55d63').removeClass('bg-yellow-400 bg-opacity-50');
+    }
+
+    findMatchBtn.on('click', findMatch);
+
+    playAgainBtn.on('click', () => {
+        resultModal.addClass('hidden');
+        findMatchBtn.show().prop('disabled', false).removeClass('opacity-50 cursor-not-allowed');
+        statusEl.text('Welcome! Click below to find a match.');
+        boardEl.empty();
+        playerColor = null;
+        isMyTurn = false;
+        currentFEN = 'start';
+    });
+
+    function applyMoveWithSpecialRules(uci, flags) {
+        console.log("Special move");
+        const from = uci.slice(0, 2);
+        const to = uci.slice(2, 4);
+        const position = board.position();
+        const piece = position[from];
+
+
+        if (flags.promotion) {
+            const promotion = uci[4];
+
+            const promotedPiece = (playerColor[0] === 'w' ? 'w' : 'b') + promotion.toUpperCase();
+            delete position[from];
+
+            position[to] = promotedPiece;
+            board.position(position, true);
+
+            promotionPending = false;
+            return;
+        }
+
+        else if (flags.castle) {
+            console.log('Moving king and rook');
+
+            if (from === 'e1' && to === 'g1') {
+                board.move('e1-g1', 'h1-f1');
+            } else if (from === 'e1' && to === 'c1') {
+                board.move('e1-c1', 'a1-d1');
+            } else if (from === 'e8' && to === 'g8') {
+                board.move('e8-g8', 'h8-f8');
+            } else if (from === 'e8' && to === 'c8') {
+                board.move('e8-c8', 'a8-d8');
+            }
+
+            currentFEN = board.fen();
+            castlePending = false;
+            return;
+        }
+
+
+        else if (flags.enPassant) {
+            const capturedPawnSquare = to[0] + from[1];
+            delete position[from];
+            delete position[capturedPawnSquare];
+
+            position[to] = piece;
+            board.position(position, true);
+
+            enPassantPending = false;
+            return;
+        }
+
+        
+        board.move(uci);
+    }
+
+
+    function fromCharCode(c) {
+        return c.charCodeAt(0);
+    }
+
+
+  </script>
+
+</body>
+</html>

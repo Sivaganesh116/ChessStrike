@@ -75,7 +75,7 @@ CheckType PawnMoveManager::handlePromotion(Piece newPiece, bool isPieceWhite, co
 
 CheckType PawnMoveManager::handleMove(bool isPieceWhite, const Move& move, Board& board) {
     // check move pattern
-    if((isPieceWhite ? move.fromRow - move.toRow > 0 : move.fromRow - move.toRow < 0) || abs(move.fromCol - move.toCol) > 1 || (abs(move.fromRow - move.toRow) == 2 && (move.fromRow != 6 && move.fromRow != 1))) {
+    if((isPieceWhite ? move.fromRow - move.toRow > 0 : move.fromRow - move.toRow < 0) || (abs(move.fromRow - move.toRow) == 2 && (move.fromRow != 6 && move.fromRow != 1)) || abs(move.fromRow - move.toRow) > 2) {
         // throw error
         throw InvalidMovePatternException("Invalid move pattern for a pawn. Move number: " + std::to_string(board.getMoveNumber() + 1) + std::string(". Move: ") + std::string(move.uciMove)); 
     }

@@ -3,4 +3,4 @@ build/
 chess_strike
 CMakeUserPresets.json
 external/uWebSockets
-external/nlohmann
+external/uSockets

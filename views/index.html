@@ -182,6 +182,9 @@
             showResult(msg.result, msg.reason);
             socket.close();
             break;
+        case 'timeUpdate':
+            console.log(msg);
+            break;
         default:
             console.warn('Unknown message type:', msg.type);
         }

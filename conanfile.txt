@@ -1,5 +1,5 @@
 [requires]
-uwebsockets/20.71.0
+libuv/1.46.0
 libpqxx/7.10.1
 nlohmann_json/3.11.3
 jwt-cpp/0.6.0
@@ -9,5 +9,4 @@ CMakeToolchain
 CMakeDeps
 
 [options]
-uwebsockets/*:shared=True
 libpqxx/*:shared=True

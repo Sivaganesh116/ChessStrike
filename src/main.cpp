@@ -1,7 +1,8 @@
 #include <iostream>
 #include <pqxx/pqxx>
-#include <uWebSockets/App.h>
+#include <App.h>
 #include <nlohmann/json.hpp>
+#include <uv.h>
 
 #include "LegalChess.h"
 #include <string>
@@ -12,8 +13,11 @@
 #include <sys/epoll.h>
 
 using json = nlohmann::json;
+struct PlayerData;
 
-auto * loop = uWS::Loop::get();
+PlayerData* waitingPlayer = nullptr;
+std::shared_ptr<uv_loop_t> uv_loop = nullptr;
+
 
 struct TimerData {
 private:
@@ -21,7 +25,7 @@ private:
     int timeRemainingSeconds = 0, timeRemainingNanoSeconds = 0; // used to store remaining time when player's turn is over
 
 public:
-    TimerData(int timeInMinutes) {
+    TimerData(int timeInMinutes, PlayerData* playerData) {
         if((fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)) == -1) {
             throw std::runtime_error("Couldn't Create Timer");
         }
@@ -64,7 +68,8 @@ public:
             return {0, 0};
         }
 
-        return {currSpec.it_value.tv_sec, currSpec.it_value.tv_nsec};
+        if(currSpec.it_value.tv_sec == 0 && currSpec.it_value.tv_nsec == 0) return {timeRemainingSeconds, timeRemainingNanoSeconds};
+        else return {currSpec.it_value.tv_sec, currSpec.it_value.tv_nsec};
     }
 
     bool startTimer() {
@@ -78,7 +83,7 @@ public:
         startSpec.it_interval.tv_nsec = 0;
         startSpec.it_interval.tv_sec = 0;
 
-        if(timerfd_settime(fd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &startSpec, NULL) == -1) {
+        if(timerfd_settime(fd, 0, &startSpec, NULL) == -1) {
             perror("Couldn't stop the timer");
             return false;
         }
@@ -104,6 +109,7 @@ struct PlayerData {
     std::shared_ptr<LC::LegalChess> chess;
     uWS::WebSocket<true, true, PlayerData>* ws, *otherWs;
     bool isWhite;
+    bool isMyTurn;
     std::unique_ptr<TimerData> timerData;
     us_timer_t* syncTimer;
 
@@ -115,6 +121,7 @@ struct PlayerData {
         ws = nullptr;
         otherWs = nullptr;
         isWhite = false;
+        isMyTurn = false;
         timerData = nullptr;
         syncTimer = nullptr;
     }
@@ -133,16 +140,22 @@ struct PlayerData {
     ~PlayerData() = default;
 
     void createSyncTimer() {
-        us_timer_t* timer = us_create_timer((us_loop_t*)loop, 1, sizeof(std::pair< uWS::WebSocket<true, true, PlayerData>*, uWS::WebSocket<true, true, PlayerData>* >*));
-        us_timer_set(timer, [](us_timer_t* timer){
-            auto * pairPointer = static_cast<std::pair< uWS::WebSocket<true, true, PlayerData>*, uWS::WebSocket<true, true, PlayerData>*> *> (us_timer_ext(timer));
-            auto& [ws1, ws2] = *pairPointer;
+        syncTimer = us_create_timer((us_loop_t*)uWS::Loop::get(), 1, sizeof(PlayerData*));
+        PlayerData* thisData = this;
+        memcpy(us_timer_ext(syncTimer), &thisData, sizeof(thisData));
+        
+
+        us_timer_set(syncTimer, [](us_timer_t* timer){
+            PlayerData * playerData1;
+
+            memcpy(&playerData1, us_timer_ext(timer), sizeof(playerData1));
 
             json timeUpdate;
             timeUpdate["type"] = "timeUpdate";
 
-            auto * playerData1 = ws1->getUserData();
-            auto * playerData2 = ws2->getUserData();
+            auto * playerData2 = playerData1->otherWs->getUserData();
+
+            
 
             auto [sec1, nano1] = playerData1->timerData->getRemainingTime();
             auto [sec2, nano2] = playerData2->timerData->getRemainingTime();
@@ -156,8 +169,10 @@ struct PlayerData {
                 timeUpdate["white"] = std::to_string(sec2) + '-' + std::to_string(nano2);
             }
 
-            ws1->send(timeUpdate.dump(), uWS::OpCode::TEXT);
-            ws2->send(timeUpdate.dump(), uWS::OpCode::TEXT);
+            playerData1->ws->send(timeUpdate.dump(), uWS::OpCode::TEXT);
+            playerData2->ws->send(timeUpdate.dump(), uWS::OpCode::TEXT);
+
+            
 
         }, 2000, 2000);
     }
@@ -167,8 +182,6 @@ struct PlayerData {
     }
 };
 
-
-PlayerData* waitingPlayer = nullptr;
 
 void serveFile(std::string fileName, std::string ext, uWS::HttpResponse<true>* res) {
     if(!ext.size()) return;
@@ -192,8 +205,77 @@ void serveFile(std::string fileName, std::string ext, uWS::HttpResponse<true>* r
     res->end(fileData);
 }
 
+void playerTimerCallBack(uv_poll_t* handle, int status, int events) {
+    if(status < 0) {
+        perror("Something went wrong with player timer expiry");
+        return;
+    }
+
+    if(events & UV_READABLE) {
+        auto * expiredPlayerData = static_cast<PlayerData*>(handle->data);
+
+        if(!expiredPlayerData) {
+            perror("Invalid Player Data in timer expire callback");
+            return;
+        }
+
+        auto& expiredTimerData = expiredPlayerData->timerData;
+
+        int fd = expiredTimerData->getFD();
+
+        // must read to close timer_fd
+        uint64_t expirations;
+        if(read(fd, &expirations, sizeof(expirations)) == -1) {
+            perror("Couldn't read timer expirations");
+            return;
+        }
+
+        auto & chess = expiredPlayerData->chess;
+        bool amIWhite = expiredPlayerData->isWhite;
+
+        json resultJson;
+        resultJson["type"] = "result";
+
+        if(chess->doesColorHaveInsufficientMaterial(!amIWhite)) {
+            resultJson["result"] = "draw";
+            resultJson["reason"] = "Timeout";
+
+            expiredPlayerData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
+            expiredPlayerData->otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
+        }
+        else {
+            resultJson["result"] = "win";
+            resultJson["reason"] = "Timeout";
+            expiredPlayerData->otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
+
+            resultJson["result"] = "lose";
+            resultJson["reason"] = "Timeout";
+            expiredPlayerData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
+        }
+        
+        // close client sync timer
+        us_timer_close(expiredPlayerData->syncTimer);
+
+        uv_poll_stop(handle);
+        uv_close((uv_handle_t*)handle, [](uv_handle_t* h) {
+            delete reinterpret_cast<uv_poll_t*>(h);
+        });
+    }
+}
+
+// Poll custom fd in the libuv event loop, make sure libuv's loop will be used by uWS as well
+void pollFd(int fd, void* extData, uv_loop_t* loop, void (*cb) (uv_poll_t*, int, int)) {
+    uv_poll_t* handle = new uv_poll_t();
+    handle->data = extData;
+
+    if(uv_poll_init(loop, handle, fd) == -1) {
+        std::cout << "poll inint failed\n";
+    }
+    uv_poll_start(handle, UV_READABLE, cb);
+}
+
+
 void startGame(PlayerData* newPlayer) {
-    std::cout << "Start - game" << std::endl;
     // Create a random device and a random number generator
     std::random_device rd;  // Seed
     std::mt19937 gen(rd()); // Mersenne Twister engine
@@ -208,27 +290,32 @@ void startGame(PlayerData* newPlayer) {
         waitingPlayer->name = "white";
         waitingPlayer->id = 1;
         waitingPlayer->isWhite = true;
+        waitingPlayer->isMyTurn = true;
 
         newPlayer->name = "black";
         newPlayer->id = 0;
         newPlayer->isWhite = false;
+        newPlayer->isMyTurn = false;
     }
     else {
         waitingPlayer->name = "black";
         waitingPlayer->id = 0;
         waitingPlayer->isWhite = false;
+        waitingPlayer->isMyTurn = false;
 
         newPlayer->name = "white";
         newPlayer->id = 1;
         newPlayer->isWhite = true;
+        newPlayer->isMyTurn = true;
     }
-
-    waitingPlayer->timerData = std::make_unique<TimerData>(5);
-    newPlayer->timerData = std::make_unique<TimerData>(5);
 
     waitingPlayer->chess = newPlayer->chess = std::make_shared<LC::LegalChess>();
     waitingPlayer->otherWs = newPlayer->ws;
     newPlayer->otherWs = waitingPlayer->ws;
+
+    waitingPlayer->timerData = std::make_unique<TimerData>(1, waitingPlayer);
+    newPlayer->timerData = std::make_unique<TimerData>(1, newPlayer);
+
 
     json toNewPlayer;
     toNewPlayer["type"] = "start-game";
@@ -250,14 +337,12 @@ void startGame(PlayerData* newPlayer) {
     if(random_number % 2) waitingPlayer->timerData->startTimer();
     else newPlayer->timerData->startTimer();
 
+    // poll the individual player timers
+    pollFd(waitingPlayer->timerData->getFD(), (void *)(waitingPlayer), (uv_loop_t*)uv_loop.get(), playerTimerCallBack);
+    pollFd(newPlayer->timerData->getFD(), (void *)(newPlayer), (uv_loop_t*)uv_loop.get(), playerTimerCallBack);
+
     // reset the waiting player
     waitingPlayer = nullptr;
-}
-
-
-// To-Do: Poll timer fds
-void pollFd(int fd) {
-    
 }
 
 
@@ -293,6 +378,9 @@ void registerRoutes(uWS::SSLApp & app) {
                     ss >> move;
 
                     chess->makeMove(move);
+
+                    playerData->isMyTurn = false;
+                    playerData->otherWs->getUserData()->isMyTurn = true;
 
                     // stop current player's timer
                     playerData->timerData->stopTimer();
@@ -341,9 +429,15 @@ void registerRoutes(uWS::SSLApp & app) {
     });
 }
 
+
 int main() {
     LC::compute();
 
+    uv_loop.reset(uv_default_loop());
+
+    if(!uv_loop) std::cout << "loop null\n";
+
+    uWS::Loop::get(uv_loop.get());
     uWS::SSLApp app;
     
     registerRoutes(app);

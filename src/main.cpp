@@ -4,7 +4,13 @@
 #include <nlohmann/json.hpp>
 #include <uv.h>
 
+#include "jwt.h"
+
 #include "LegalChess.h"
+#include "concurrentqueue.h"
+#include "ThreadPool.h"
+#include "ConnectionPool.h"
+
 #include <string>
 #include <sstream>
 #include <fstream>
@@ -15,14 +21,23 @@
 using json = nlohmann::json;
 struct PlayerData;
 
-PlayerData* waitingPlayer = nullptr;
+PlayerData* waitingPlayer = nullptr, *regWaitingPlayer = nullptr;
 std::shared_ptr<uv_loop_t> uv_loop = nullptr;
+
+const std::string connStr = "host=localhost port=5432 dbname=chess user=postgres password=yourpassword";
+PostgresConnectionPool pool(connStr, 10);
+
+ThreadPool threadPool(2);
+
+// JWT secret key
+const std::string jwtSecret = "your_secret_key";
 
 
 struct TimerData {
 private:
     int fd = -1;
     int timeRemainingSeconds = 0, timeRemainingNanoSeconds = 0; // used to store remaining time when player's turn is over
+    uv_poll_t* poll = nullptr;
 
 public:
     TimerData(int timeInMinutes, PlayerData* playerData) {
@@ -93,13 +108,23 @@ public:
 
     void closeTimer() {
         if(fd != -1) {
-            close(fd);
+            if(close(fd) < 0) {
+                perror("couldn't close fd");
+            }
             fd = -1;
         }
     }
 
     int getFD() const {
         return fd;
+    }
+
+    void setPoll(uv_poll_t* poll) {
+        this->poll = poll;
+    }
+
+    uv_poll_t* getPoll() const {
+        return poll;
     }
 };
 
@@ -112,6 +137,7 @@ struct PlayerData {
     bool isMyTurn;
     std::unique_ptr<TimerData> timerData;
     us_timer_t* syncTimer;
+    bool authDone;
 
 
     PlayerData() {
@@ -124,6 +150,7 @@ struct PlayerData {
         isMyTurn = false;
         timerData = nullptr;
         syncTimer = nullptr;
+        authDone = false;
     }
 
     PlayerData(PlayerData&& other) {
@@ -230,6 +257,30 @@ void playerTimerCallBack(uv_poll_t* handle, int status, int events) {
             return;
         }
 
+        // close client sync timer
+        us_timer_close(expiredPlayerData->syncTimer);
+
+        // close the expired timer
+        if(uv_poll_stop(handle) < 0) {
+            perror("Couldn't stop timer poll");
+        }
+
+        uv_close(reinterpret_cast<uv_handle_t*>(handle), [](uv_handle_t* h) {
+            delete (uv_poll_t*)h;
+        });
+
+
+        // close the other player's running timer
+        auto& runningTimerData = expiredPlayerData->otherWs->getUserData()->timerData;
+
+        if(uv_poll_stop(runningTimerData->getPoll()) < 0) {
+            perror("Couldn't stop timer poll");
+        }
+
+        uv_close(reinterpret_cast<uv_handle_t*>(runningTimerData->getPoll()), [](uv_handle_t* h) {
+            delete (uv_poll_t*)h;
+        });
+
         auto & chess = expiredPlayerData->chess;
         bool amIWhite = expiredPlayerData->isWhite;
 
@@ -252,14 +303,6 @@ void playerTimerCallBack(uv_poll_t* handle, int status, int events) {
             resultJson["reason"] = "Timeout";
             expiredPlayerData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
         }
-        
-        // close client sync timer
-        us_timer_close(expiredPlayerData->syncTimer);
-
-        uv_poll_stop(handle);
-        uv_close((uv_handle_t*)handle, [](uv_handle_t* h) {
-            delete reinterpret_cast<uv_poll_t*>(h);
-        });
     }
 }
 
@@ -268,10 +311,16 @@ void pollFd(int fd, void* extData, uv_loop_t* loop, void (*cb) (uv_poll_t*, int,
     uv_poll_t* handle = new uv_poll_t();
     handle->data = extData;
 
-    if(uv_poll_init(loop, handle, fd) == -1) {
-        std::cout << "poll inint failed\n";
+    PlayerData* playerData = (PlayerData*)extData;
+    playerData->timerData->setPoll(handle);
+
+    if((uv_poll_init(loop, handle, fd)) < 0) {
+        perror("uv_poll_init failed");
+
     }
-    uv_poll_start(handle, UV_READABLE, cb);
+    if(uv_poll_start(handle, UV_READABLE, cb) < 0) {
+        perror("uv_poll_start failed");
+    }
 }
 
 
@@ -287,23 +336,23 @@ void startGame(PlayerData* newPlayer) {
     int random_number = dist(gen);
 
     if(random_number % 2) {
-        waitingPlayer->name = "white";
+        if(waitingPlayer->name == "") waitingPlayer->name = "white";
         waitingPlayer->id = 1;
         waitingPlayer->isWhite = true;
         waitingPlayer->isMyTurn = true;
 
-        newPlayer->name = "black";
+        if(newPlayer->name == "") newPlayer->name = "black";
         newPlayer->id = 0;
         newPlayer->isWhite = false;
         newPlayer->isMyTurn = false;
     }
     else {
-        waitingPlayer->name = "black";
+        if(waitingPlayer->name == "") waitingPlayer->name = "black";
         waitingPlayer->id = 0;
         waitingPlayer->isWhite = false;
         waitingPlayer->isMyTurn = false;
 
-        newPlayer->name = "white";
+        if(newPlayer->name == "") newPlayer->name = "white";
         newPlayer->id = 1;
         newPlayer->isWhite = true;
         newPlayer->isMyTurn = true;
@@ -346,9 +395,213 @@ void startGame(PlayerData* newPlayer) {
 }
 
 
+std::string createJWT(const std::string& username) {
+    auto token = jwt::create()
+        .set_type("JWT")
+        .set_issuer("chess-strike")
+        .set_payload_claim("username", jwt::claim(username))
+        .sign(jwt::algorithm::hs256{jwtSecret});
+    return token;
+}
+
+void handleSignupOrLogin(uWS::HttpResponse<true>* res, std::string_view body, PostgresConnectionPool& pool, ThreadPool& threadPool, bool isSignup) {
+    // Expecting body in format: username=<username>&password=<password>
+    std::string bodyStr(body);
+    std::unordered_map<std::string, std::string> form;
+    std::istringstream ss(bodyStr);
+    std::string item;
+    while (std::getline(ss, item, '&')) {
+        auto pos = item.find('=');
+        if (pos != std::string::npos) {
+            form[item.substr(0, pos)] = item.substr(pos + 1);
+        }
+    }
+
+    std::string username = form["username"];
+    std::string password = form["password"];
+
+    threadPool.submit([&pool, res, username, password, isSignup]() {
+        try {
+            auto connHandle = pool.acquire();
+            pqxx::work txn(*connHandle->get());
+
+            if (isSignup) {
+                pqxx::zview query("SELECT username FROM player WHERE username = $1");
+                pqxx::params params(username);
+                pqxx::result r = txn.exec(query, params);
+
+                if (!r.empty()) {
+                    res->writeStatus("409 Conflict")->end("Username already exists.");
+                    return;
+                }
+
+                query = "INSERT INTO player (username, password) VALUES ($1, $2)";
+                params = {username, password};
+
+                txn.exec(query, params);
+                txn.commit();
+                std::string token = createJWT(username);
+                res->end("Signup successful. Token: " + token);
+            } else {
+                pqxx::zview query = "SELECT password FROM player WHERE username = $1";
+                pqxx::params params(username);
+                
+                pqxx::result r = txn.exec(query, params);
+                if (r.empty() || r[0][0].as<std::string>() != password) {
+                    res->writeStatus("401 Unauthorized")->end("Invalid credentials.");
+                    return;
+                }
+                std::string token = createJWT(username);
+                res->end("Login successful. Token: " + token);
+            }
+        } catch (const std::exception& e) {
+            res->writeStatus("500 Internal Server Error")->end("Database error.");
+        }
+    });
+}
+
+std::string getTokenFromReq(uWS::HttpRequest * req) {
+    std::string_view authHeader = req->getHeader("authorization");
+
+    if (authHeader.empty() || authHeader.substr(0, 7) != "Bearer ") {
+        // res->writeStatus("401 Unauthorized")->end("Missing or invalid Authorization header");
+        return "";
+    }
+
+    std::string token = std::string(authHeader.substr(7));  // Skip "Bearer "
+
+    return token;
+}
+
+std::string getUserNameFromToken(std::string token) {
+    std::string username = "";
+
+    try {
+        auto decoded = jwt::decode(token);
+
+        auto verifier = jwt::verify()
+            .allow_algorithm(jwt::algorithm::hs256{jwtSecret})
+            .with_issuer("chess-server");
+
+        verifier.verify(decoded);  // Throws if verification fails
+
+        std::string username = decoded.get_payload_claim("username").as_string();
+
+        // res->end("Authenticated as: " + username);
+    } catch (const std::exception& e) {
+        std::cout << "Invalid token: " << e.what() << std::endl;
+        // res->writeStatus("401 Unauthorized")->end(std::string("Invalid token: ") + e.what());
+    }
+
+    return username;
+}
+
+
 void registerRoutes(uWS::SSLApp & app) {
-    app.get("/home", [](auto * res, auto * req) {
-        serveFile("views/index", ".html", res);
+    app.ws<PlayerData>("/new-game", {
+
+        .open = [](auto* ws) {
+            std::cout << "reg-game requested\n";
+        },
+
+        .message = [](auto* ws, std::string_view msg, uWS::OpCode code) {
+            auto * playerData = ws->getUserData();
+
+            std::stringstream ss{std::string(msg)};
+            std::string msgType;
+            ss >> msgType;
+
+            if(msgType == "auth") {
+                std::string token;
+                ss >> token;
+
+                std::string username = getUserNameFromToken(token);
+
+                if(username.length() == 0) {
+                    ws->send("Not authorised", uWS::OpCode::TEXT);
+                    ws->close();
+                }
+                else {
+                    ws->getUserData()->authDone = true;
+                    playerData->name = username;
+                    playerData->ws = ws;
+
+                    if(regWaitingPlayer == nullptr) regWaitingPlayer = playerData;
+                    else startGame(playerData);
+                }
+            }
+
+            else if(msgType == "move") {
+                if(!playerData->authDone) {
+                    ws->send("Not authorised", uWS::OpCode::TEXT);
+                    ws->close();
+                    return;
+                }
+
+                auto & chess = ws->getUserData()->chess;
+
+                try {
+                    std::string move;
+                    ss >> move;
+
+                    chess->makeMove(move);
+
+                    playerData->isMyTurn = false;
+                    playerData->otherWs->getUserData()->isMyTurn = true;
+
+                    // stop current player's timer
+                    playerData->timerData->stopTimer();
+
+                    playerData->ws->send("move:true", code);
+                    playerData->otherWs->send("newmove:" + move, code);
+
+                    // start opponent's timer
+                    playerData->otherWs->getUserData()->timerData->startTimer();
+                    
+                    if(chess->isGameOver()) {
+                        json resultJson;
+                        resultJson["type"] = "result";
+
+                        if(chess->isCheckMate(!playerData->isWhite)) {
+                            resultJson["result"] = "win";
+                            resultJson["reason"] = "Checkmate";
+                            playerData->ws->send(resultJson.dump(), code);
+
+                            resultJson["result"] = "lose";
+                            resultJson["reason"] = "Checkmate";
+                            playerData->otherWs->send(resultJson.dump(), code);
+                        }
+                        else {
+                            resultJson["result"] = "draw";
+                            
+                            if(chess->isStalemate()) resultJson["reason"] = "Stalemate";
+                            else if(chess->isDrawByInsufficientMaterial()) resultJson["reason"] = "Insufficient Material";
+                            else if(chess->isDrawByRepitition()) resultJson["reason"] = "Repitition";
+                            else if(chess->isDrawBy50MoveRule()) resultJson["reason"] = "50 Half Moves";
+
+                            playerData->ws->send(resultJson.dump(), code);
+                            playerData->otherWs->send(resultJson.dump(), code);
+                        }
+
+                        // close client sync timer
+                        us_timer_close(playerData->syncTimer);
+                    }
+
+                } catch(std::exception& e) {
+                    ws->send("move:false", code);
+                    ws->send(std::string("Error:") + e.what(), code);
+                }
+            }
+            else if(msgType == "chat") {
+                if(!playerData->authDone) {
+                    ws->send("Not authorised");
+                    ws->close();
+                    return;
+                }
+
+                ws->getUserData()->otherWs->send(msg);
+            }
+        }
     });
 
     app.ws<PlayerData>("/rand-game", {
@@ -371,7 +624,7 @@ void registerRoutes(uWS::SSLApp & app) {
 
             std::string msgType;
             ss >> msgType;
-
+            
             if(msgType == "move") {
                 try {
                     std::string move;
@@ -425,7 +678,30 @@ void registerRoutes(uWS::SSLApp & app) {
                     ws->send(std::string("Error:") + e.what(), code);
                 }
             }
+            else if(msgType == "chat") {
+                ws->getUserData()->otherWs->send(msg);
+            }
         }
+    });
+
+    app.get("/home", [](auto * res, auto * req) {
+        serveFile("views/index", ".html", res);
+    });
+
+    app.post("/signup", [](auto* res, auto* req) {
+        res->onData([res](std::string_view data, bool last) mutable {
+            if (last) {
+                handleSignupOrLogin(res, data, pool, threadPool, true);
+            }
+        });
+    });
+
+    app.post("/login", [](auto* res, auto* req) {
+        res->onData([res](std::string_view data, bool last) mutable {
+            if (last) {
+                handleSignupOrLogin(res, data, pool, threadPool, false);
+            }
+        });
     });
 }
 

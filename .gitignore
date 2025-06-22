@@ -4,3 +4,7 @@ chess_strike
 CMakeUserPresets.json
 external/uWebSockets
 external/uSockets
+external/jwt-cpp
+external/picojson
+external/concurrentqueue.h
+external/libuv

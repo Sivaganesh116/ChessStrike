@@ -13,15 +13,16 @@
 class ThreadPool {
 private:
     std::vector<std::thread> workers;
-    moodycamel::ConcurrentQueue<std::function<void()>> taskQueue;
     std::atomic<bool> running;
-
+    moodycamel::ConcurrentQueue<uWS::MoveOnlyFunction<void()>> taskQueue;
+    
 public:
     ThreadPool(size_t numThreads) : running(true) {
         for (size_t i = 0; i < numThreads; ++i) {
             workers.emplace_back([this]() {
                 while (running.load(std::memory_order_acquire)) {
-                    std::function<void()> task;
+                    uWS::MoveOnlyFunction<void()> task;
+
                     if (taskQueue.try_dequeue(task)) {
                         task();
                     } else {
@@ -32,9 +33,9 @@ public:
         }
     }
 
-    void submit(std::function<void()> func) {
+    void submit(uWS::MoveOnlyFunction<void()> task) {
         assert(running && "ThreadPool not running");
-        taskQueue.enqueue(std::move(func));
+        taskQueue.enqueue(std::move(task));
     }
 
     void shutdown() {

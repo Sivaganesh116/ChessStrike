@@ -70,6 +70,10 @@ public:
         return m_pBoard->getGameResult();
     }   
 
+    std::string getMoveHistory() {
+        return m_pBoard->getMoveHistory();
+    }
+
     bool isGameOver() {
         return m_pBoard->isGameOver();
     }

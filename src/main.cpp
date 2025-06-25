@@ -32,6 +32,9 @@ ThreadPool threadPool(2);
 // JWT secret key
 const std::string jwtSecret = "your_secret_key";
 
+std::unordered_map<std::string, PlayerData*> closedConnections;
+std::unordered_map<int, std::pair<PlayerData*, PlayerData*>> liveGames;
+
 
 struct TimerData {
 private:
@@ -48,8 +51,14 @@ public:
         timeRemainingSeconds = timeInMinutes * 60; 
     }
 
-    ~TimerData() {
-        closeTimer();
+    ~TimerData() = default;
+
+    TimerData(TimerData&& other) {
+        this->fd = other.fd;
+        this->timeRemainingNanoSeconds = other.timeRemainingNanoSeconds;
+        this->timeRemainingSeconds = other.timeRemainingSeconds;
+        this->poll = other.poll;
+        other.poll = nullptr;
     }
 
     bool stopTimer() {
@@ -107,6 +116,14 @@ public:
     }
 
     void closeTimer() {
+        if(uv_poll_stop(poll) < 0) {
+            perror("Couldn't stop timer poll");
+        }
+
+        uv_close(reinterpret_cast<uv_handle_t*>(poll), [](uv_handle_t* h) {
+            delete (uv_poll_t*)h;
+        });
+
         if(fd != -1) {
             if(close(fd) < 0) {
                 perror("couldn't close fd");
@@ -137,6 +154,7 @@ struct PlayerData {
     bool isMyTurn;
     std::unique_ptr<TimerData> timerData;
     us_timer_t* syncTimer;
+    us_timer_t* abandonTimer;
     bool authDone;
 
 
@@ -150,6 +168,7 @@ struct PlayerData {
         isMyTurn = false;
         timerData = nullptr;
         syncTimer = nullptr;
+        abandonTimer = nullptr;
         authDone = false;
     }
 
@@ -162,6 +181,10 @@ struct PlayerData {
         this->isWhite = other.isWhite;
         this->timerData = std::move(other.timerData);
         this->syncTimer = other.syncTimer;
+        this->abandonTimer = other.abandonTimer;
+        this->authDone = other.authDone;
+
+        other.syncTimer = other.abandonTimer = nullptr;
     }
 
     ~PlayerData() = default;
@@ -199,13 +222,253 @@ struct PlayerData {
             playerData1->ws->send(timeUpdate.dump(), uWS::OpCode::TEXT);
             playerData2->ws->send(timeUpdate.dump(), uWS::OpCode::TEXT);
 
-            
-
         }, 2000, 2000);
     }
 
     void createSyncTimer(us_timer_t* timer) {
         syncTimer = timer;
+    }
+
+    void createAbandonTimer() {
+        if(abandonTimer != nullptr) return;
+
+        abandonTimer = us_create_timer((us_loop_t*)uWS::Loop::get(), 1, sizeof(PlayerData*));
+        PlayerData* thisData = this;
+        memcpy(us_timer_ext(abandonTimer), &thisData, sizeof(thisData));
+
+        us_timer_set(abandonTimer, [](us_timer_t* timer) {
+            PlayerData* abandonedPlayer;
+            memcpy(abandonedPlayer, us_timer_ext(timer), sizeof(abandonedPlayer));
+
+            abandonedPlayer->abandonHandler();
+        }, 30000, 30000);
+    }
+
+    void timeOutHandler() {
+        // stop other player timer, my abandon timer, other player abandon timer
+
+        std::string_view result;
+
+        json resultJson;
+        resultJson["type"] = "result";
+
+        if(chess->doesColorHaveInsufficientMaterial(!isWhite)) {
+            resultJson["result"] = "draw";
+            resultJson["reason"] = "Timeout";
+
+            ws->send(resultJson.dump(), uWS::OpCode::TEXT);
+            otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
+
+            result = "draw";
+        }
+        else {
+            resultJson["result"] = "win";
+            resultJson["reason"] = "Timeout";
+            otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
+
+            resultJson["result"] = "lose";
+            resultJson["reason"] = "Timeout";
+            ws->send(resultJson.dump(), uWS::OpCode::TEXT);
+
+            result = isWhite ? "black" : "white";
+        }
+
+        auto *otherPlayerData = otherWs->getUserData();
+
+        std::string_view whiteName;
+        std::string_view blackName;
+        std::string_view move_history = chess->getMoveHistory();
+        std::string_view reason = "timeout";
+
+        if(isWhite) {
+            whiteName = name;
+            blackName = otherPlayerData->name;
+        }
+        else {
+            whiteName = otherPlayerData->name;
+            blackName = name;
+        }
+
+        threadPool.submit([whiteName, blackName, reason, result, move_history]() {
+            auto connHandle = pool.acquire();
+            int game_id = -1;
+
+            // update table "game"
+            try {
+                pqxx::work txn(*connHandle->get());
+
+                pqxx::result txnResult = txn.exec(
+                    pqxx::zview("INSERT INTO game (white_id, black_id, move_history, result, reason) "
+                    "VALUES ($1, $2, $3, $4, $5) RETURNING id"),
+                    pqxx::params(whiteName, blackName, move_history, result, reason)
+                );
+
+                if(txnResult.empty()) {
+                    std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+                }
+                else {
+                    game_id = txnResult[0][0].as<int>();
+                }
+
+                txn.commit();
+            } catch (const std::exception& e) {
+                std::cerr << "Error inserting game: " << e.what() << std::endl;
+            }
+
+            // get id from username
+            int white_id = -1, black_id = -1;
+
+            try {
+                pqxx::work txn(*connHandle->get());
+                int white_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+                int black_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+            } catch (const std::exception& e) {
+                std::cerr << "Error fetching id from user_name: " << e.what() << std::endl;
+            }
+
+            // update tabe "user_to_game"
+            try {
+                std::string_view whiteResult, blackResult;
+                if(result == "draw") {
+                    whiteResult = "draw";
+                    blackResult = "draw";
+                }
+                else if(result == "white") {
+                    whiteResult = "won";
+                    blackResult = "lost";
+                }
+                else {
+                    whiteResult = "lost";
+                    blackResult = "won";
+                }
+
+                pqxx::work txn{*connHandle->get()};
+
+                txn.exec(
+                    pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                    "VALUES ($1, $2, $3)"),
+                    pqxx::params(white_id, game_id, whiteResult)
+                );
+
+                txn.exec(
+                    pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                    "VALUES ($1, $2, $3)"),
+                    pqxx::params(black_id, game_id, blackResult)
+                );
+
+                txn.commit();
+            } catch (const std::exception& e) {
+                std::cerr << "Error inserting into user_to_game: " << e.what() << std::endl;
+            }
+        });
+    }
+
+    void abandonHandler() {
+        auto *otherPlayerData = otherWs->getUserData();
+
+        // close timers
+        if(abandonTimer) us_timer_close(abandonTimer);
+        if(otherPlayerData->abandonTimer) us_timer_close(otherPlayerData->abandonTimer);
+        timerData->closeTimer();
+        otherPlayerData->timerData->closeTimer();
+
+        std::string_view result, whiteResult, blackResult;
+
+        json resultJson;
+        resultJson["type"] = "result";
+
+        
+        resultJson["result"] = "win";
+        resultJson["reason"] = "abandonment";
+        otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
+
+        resultJson["result"] = "lose";
+        ws->send(resultJson.dump(), uWS::OpCode::TEXT);
+
+        if(isWhite) {
+            result = "white";
+            whiteResult = "won";
+            blackResult = "lost";
+        }
+        else {
+            result = "black";
+            whiteResult = "lost";
+            blackResult = "won";
+        }
+
+
+        std::string_view whiteName;
+        std::string_view blackName;
+        std::string_view move_history = chess->getMoveHistory();
+        std::string_view reason = "abandonment";
+
+        if(isWhite) {
+            whiteName = name;
+            blackName = otherPlayerData->name;
+        }
+        else {
+            whiteName = otherPlayerData->name;
+            blackName = name;
+        }
+
+        threadPool.submit([whiteName, blackName, whiteResult, blackResult, reason, result, move_history]() {
+            auto connHandle = pool.acquire();
+            int game_id = -1;
+
+            // update table "game"
+            try {
+                pqxx::work txn(*connHandle->get());
+
+                pqxx::result txnResult = txn.exec(
+                    pqxx::zview("INSERT INTO game (white_id, black_id, move_history, result, reason) "
+                    "VALUES ($1, $2, $3, $4, $5) RETURNING id"),
+                    pqxx::params(whiteName, blackName, move_history, result, reason)
+                );
+
+                if(txnResult.empty()) {
+                    std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+                }
+                else {
+                    game_id = txnResult[0][0].as<int>();
+                }
+
+                txn.commit();
+            } catch (const std::exception& e) {
+                std::cerr << "Error inserting game: " << e.what() << std::endl;
+            }
+
+            // get id from username
+            int white_id = -1, black_id = -1;
+
+            try {
+                pqxx::work txn(*connHandle->get());
+                int white_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+                int black_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+            } catch (const std::exception& e) {
+                std::cerr << "Error fetching id from user_name: " << e.what() << std::endl;
+            }
+
+            // update tabe "user_to_game"
+            try {
+                pqxx::work txn{*connHandle->get()};
+
+                txn.exec(
+                    pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                    "VALUES ($1, $2, $3)"),
+                    pqxx::params(white_id, game_id, whiteResult)
+                );
+
+                txn.exec(
+                    pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                    "VALUES ($1, $2, $3)"),
+                    pqxx::params(black_id, game_id, blackResult)
+                );
+
+                txn.commit();
+            } catch (const std::exception& e) {
+                std::cerr << "Error inserting into user_to_game: " << e.what() << std::endl;
+            }
+        });
     }
 };
 
@@ -240,7 +503,6 @@ void playerTimerCallBack(uv_poll_t* handle, int status, int events) {
 
     if(events & UV_READABLE) {
         auto * expiredPlayerData = static_cast<PlayerData*>(handle->data);
-
         if(!expiredPlayerData) {
             perror("Invalid Player Data in timer expire callback");
             return;
@@ -260,49 +522,22 @@ void playerTimerCallBack(uv_poll_t* handle, int status, int events) {
         // close client sync timer
         us_timer_close(expiredPlayerData->syncTimer);
 
-        // close the expired timer
-        if(uv_poll_stop(handle) < 0) {
-            perror("Couldn't stop timer poll");
-        }
+        // close expired timer
+        expiredTimerData->closeTimer();
 
-        uv_close(reinterpret_cast<uv_handle_t*>(handle), [](uv_handle_t* h) {
-            delete (uv_poll_t*)h;
-        });
-
+        auto * otherPlayerData = expiredPlayerData->otherWs->getUserData();
 
         // close the other player's running timer
-        auto& runningTimerData = expiredPlayerData->otherWs->getUserData()->timerData;
+        auto& runningTimerData = otherPlayerData->timerData;
 
-        if(uv_poll_stop(runningTimerData->getPoll()) < 0) {
-            perror("Couldn't stop timer poll");
-        }
+        runningTimerData->closeTimer();
 
-        uv_close(reinterpret_cast<uv_handle_t*>(runningTimerData->getPoll()), [](uv_handle_t* h) {
-            delete (uv_poll_t*)h;
-        });
+        // close abandonTimers
+        if(expiredPlayerData->abandonTimer) us_timer_close(expiredPlayerData->abandonTimer);
+        if(otherPlayerData->abandonTimer) us_timer_close(otherPlayerData->abandonTimer);
 
-        auto & chess = expiredPlayerData->chess;
-        bool amIWhite = expiredPlayerData->isWhite;
 
-        json resultJson;
-        resultJson["type"] = "result";
-
-        if(chess->doesColorHaveInsufficientMaterial(!amIWhite)) {
-            resultJson["result"] = "draw";
-            resultJson["reason"] = "Timeout";
-
-            expiredPlayerData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-            expiredPlayerData->otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
-        }
-        else {
-            resultJson["result"] = "win";
-            resultJson["reason"] = "Timeout";
-            expiredPlayerData->otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
-
-            resultJson["result"] = "lose";
-            resultJson["reason"] = "Timeout";
-            expiredPlayerData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-        }
+        expiredPlayerData->timeOutHandler();
     }
 }
 
@@ -497,111 +732,395 @@ std::string getUserNameFromToken(std::string token) {
 }
 
 
+// Helper to parse cookie string
+std::unordered_map<std::string, std::string> parseCookies(std::string_view cookieHeader) {
+    std::unordered_map<std::string, std::string> cookies;
+    size_t pos = 0;
+    while (pos < cookieHeader.size()) {
+        size_t eq = cookieHeader.find('=', pos);
+        if (eq == std::string_view::npos) break;
+        size_t end = cookieHeader.find(';', eq);
+        if (end == std::string_view::npos) end = cookieHeader.size();
+        std::string key = std::string(cookieHeader.substr(pos, eq - pos));
+        std::string value = std::string(cookieHeader.substr(eq + 1, end - eq - 1));
+        cookies[key] = value;
+        pos = end + 2; // skip "; "
+    }
+    return cookies;
+}
+
+
+void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData> * ws, std::string_view msg, uWS::OpCode code) {
+    auto * playerData = ws->getUserData();
+
+    std::stringstream ss{std::string(msg)};
+    std::string msgType;
+    ss >> msgType;
+
+    if(msgType == "auth") {
+        std::string token;
+        ss >> token;
+
+        std::string username = getUserNameFromToken(token);
+
+        if(username.length() == 0) {
+            ws->send("Not authorised", uWS::OpCode::TEXT);
+            ws->close();
+        }
+        else {
+            auto it = closedConnections.find(username);
+
+            if(it == closedConnections.end()) {
+                // a new game
+                ws->getUserData()->authDone = true;
+                playerData->name = username;
+                playerData->ws = ws;
+
+                if(regWaitingPlayer == nullptr) regWaitingPlayer = playerData;
+                else startGame(playerData);
+
+                return;
+            }
+
+            auto * reconnectedPlayerData = it->second;
+            // stop abandon timer
+            us_timer_close(reconnectedPlayerData->abandonTimer);
+            // to-do: set the abandonTimer to null?
+
+            reconnectedPlayerData->authDone = true;
+            reconnectedPlayerData->ws = ws;
+
+            if(reconnectedPlayerData->otherWs != nullptr) {
+                reconnectedPlayerData->otherWs->getUserData()->otherWs = ws;
+            }
+
+            std::cout << "Player Re-Connected: " << reconnectedPlayerData->name << '\n';
+        }
+    }
+    else if(msgType == "move") {
+        if(!playerData->authDone) {
+            ws->send("Not authorised", uWS::OpCode::TEXT);
+            ws->close();
+            return;
+        }
+
+        auto & chess = ws->getUserData()->chess;
+
+        try {
+            std::string move;
+            ss >> move;
+
+            chess->makeMove(move);
+
+            playerData->isMyTurn = false;
+            playerData->otherWs->getUserData()->isMyTurn = true;
+
+            // stop current player's timer
+            playerData->timerData->stopTimer();
+
+            playerData->ws->send("move:true", code);
+            playerData->otherWs->send("newmove:" + move, code);
+
+            // start opponent's timer
+            playerData->otherWs->getUserData()->timerData->startTimer();
+            
+            if(chess->isGameOver()) {
+                auto* otherPlayerData = playerData->otherWs->getUserData();
+
+                json resultJson;
+                resultJson["type"] = "result";
+
+                if(chess->isCheckMate(!playerData->isWhite)) {
+                    resultJson["result"] = "win";
+                    resultJson["reason"] = "Checkmate";
+                    playerData->ws->send(resultJson.dump(), code);
+
+                    resultJson["result"] = "lose";
+                    resultJson["reason"] = "Checkmate";
+                    playerData->otherWs->send(resultJson.dump(), code);
+
+                    std::string_view whiteName;
+                    std::string_view blackName;
+                    std::string_view reason = "Checkmate";
+                    std::string_view result = playerData->isWhite ? "white" : "black";
+                    std::string_view move_history = playerData->chess->getMoveHistory();
+
+                    if(playerData->isWhite) {
+                        whiteName = playerData->name;
+                        blackName = otherPlayerData->name;
+                    }
+                    else {
+                        whiteName = otherPlayerData->name;
+                        blackName = playerData->name;
+                    }
+
+                    threadPool.submit([whiteName, blackName, reason, result, move_history]() {
+                        auto connHandle = pool.acquire();
+                        int game_id = -1;
+
+                        // update table "game"
+                        try {
+                            pqxx::work txn(*connHandle->get());
+
+                            pqxx::result txnResult = txn.exec(
+                                pqxx::zview("INSERT INTO game (white_id, black_id, move_history, result, reason) "
+                                "VALUES ($1, $2, $3, $4, $5) RETURNING id"),
+                                pqxx::params(whiteName, blackName, move_history, result, reason)
+                            );
+
+                            if(txnResult.empty()) {
+                                std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+                            }
+                            else {
+                                game_id = txnResult[0][0].as<int>();
+                            }
+
+                            txn.commit();
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error inserting game: " << e.what() << std::endl;
+                        }
+
+                        // get id from username
+                        int white_id = -1, black_id = -1;
+
+                        try {
+                            pqxx::work txn(*connHandle->get());
+                            int white_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+                            int black_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error fetching id from user_name: " << e.what() << std::endl;
+                        }
+
+                        // update tabe "user_to_game"
+                        try {
+                            std::string_view whiteResult, blackResult;
+                            if(result == "white") {
+                                whiteResult = "won";
+                                blackResult = "lost";
+                            }
+                            else {
+                                whiteResult = "lost";
+                                blackResult = "won";
+                            }
+
+                            pqxx::work txn{*connHandle->get()};
+
+                            txn.exec(
+                                pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                                "VALUES ($1, $2, $3)"),
+                                pqxx::params(white_id, game_id, whiteResult)
+                            );
+
+                            txn.exec(
+                                pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                                "VALUES ($1, $2, $3)"),
+                                pqxx::params(black_id, game_id, blackResult)
+                            );
+
+                            txn.commit();
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error inserting into user_to_game: " << e.what() << std::endl;
+                        }
+                    });
+                }
+                else {
+                    resultJson["result"] = "draw";
+                    std::string_view reason;
+                    
+                    if(chess->isStalemate()) resultJson["reason"] = "Stalemate", reason = "stalemate";
+                    else if(chess->isDrawByInsufficientMaterial()) resultJson["reason"] = "Insufficient Material", reason = "insufficient";
+                    else if(chess->isDrawByRepitition()) resultJson["reason"] = "Repitition", reason = "repitition";
+                    else if(chess->isDrawBy50MoveRule()) resultJson["reason"] = "50 Half Moves", reason = "50_half_moves";
+
+                    playerData->ws->send(resultJson.dump(), code);
+                    playerData->otherWs->send(resultJson.dump(), code);
+
+                    std::string_view whiteName;
+                    std::string_view blackName;
+                    std::string_view result = "draw";
+                    std::string_view move_history = playerData->chess->getMoveHistory();
+
+                    if(playerData->isWhite) {
+                        whiteName = playerData->name;
+                        blackName = otherPlayerData->name;
+                    }
+                    else {
+                        whiteName = otherPlayerData->name;
+                        blackName = playerData->name;
+                    }
+
+                    // update db
+                    threadPool.submit([whiteName, blackName, result, reason, move_history]() {
+                        auto connHandle = pool.acquire();
+                        int game_id = -1;
+
+                        // update table "game"
+                        try {
+                            pqxx::work txn(*connHandle->get());
+
+                            pqxx::result txnResult = txn.exec(
+                                pqxx::zview("INSERT INTO game (white_id, black_id, move_history, result, reason) "
+                                "VALUES ($1, $2, $3, $4, $5) RETURNING id"),
+                                pqxx::params(whiteName, blackName, move_history, result, reason)
+                            );
+
+                            if(txnResult.empty()) {
+                                std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+                            }
+                            else {
+                                game_id = txnResult[0][0].as<int>();
+                            }
+
+                            txn.commit();
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error inserting game: " << e.what() << std::endl;
+                        }
+
+                        // get id from username
+                        int white_id = -1, black_id = -1;
+
+                        try {
+                            pqxx::work txn(*connHandle->get());
+                            int white_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+                            int black_id = txn.query_value<int>(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(whiteName));
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error fetching id from user_name: " << e.what() << std::endl;
+                        }
+
+                        // update tabe "user_to_game"
+                        try {
+                            std::string_view whiteResult, blackResult;
+                            if(result == "white") {
+                                whiteResult = "won";
+                                blackResult = "lost";
+                            }
+                            else {
+                                whiteResult = "lost";
+                                blackResult = "won";
+                            }
+
+                            pqxx::work txn{*connHandle->get()};
+
+                            txn.exec(
+                                pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                                "VALUES ($1, $2, $3)"),
+                                pqxx::params(white_id, game_id, whiteResult)
+                            );
+
+                            txn.exec(
+                                pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
+                                "VALUES ($1, $2, $3)"),
+                                pqxx::params(black_id, game_id, blackResult)
+                            );
+
+                            txn.commit();
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error inserting into user_to_game: " << e.what() << std::endl;
+                        }
+
+                        std::cout << "Game data saved to db\n" << std::endl;
+                    });
+                }
+
+                // close client sync timer
+                us_timer_close(playerData->syncTimer);
+            }
+
+        } catch(std::exception& e) {
+            ws->send("move:false", code);
+            ws->send(std::string("Error:") + e.what(), code);
+        }
+    }
+    else if(msgType == "chat") {
+        if(!playerData->authDone) {
+            ws->send("Not authorised");
+            ws->close();
+            return;
+        }
+
+        ws->getUserData()->otherWs->send(msg);
+    }
+}
+
+void gameWScloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, std::string_view msg) {
+    // store the player data
+    PlayerData* playerData = new PlayerData(std::move(*ws->getUserData()));
+    playerData->authDone = false;
+    playerData->ws = playerData->otherWs = nullptr;
+
+    closedConnections.insert({playerData->name, playerData});
+
+    // start abandon timer
+    playerData->createAbandonTimer();
+
+    std::cout << "Connection Closed: " << playerData->name << '\n';
+} 
+
 void registerRoutes(uWS::SSLApp & app) {
+    app.ws<std::string>("/spectate", {
+        .open = [](auto * ws) {
+
+        }
+    });
+
+    app.get("/game:id", [](auto * res, auto * req) {
+        std::string sGameId(req->getParameter("id"));
+        int gameId = -1;
+
+        try {
+            gameId = stoi(sGameId);    
+        } catch (std::exception& e) {
+            std::cerr << "Error in GET game: " << e.what() << std::endl;
+            return;
+        }
+
+        // if it is a live game
+        if(liveGames.find(gameId) != liveGames.end()) {
+            
+        }
+        else {
+            res->onData([res, req, gameId](std::string_view data, bool last) mutable {
+                if(last) {
+                    // read data from db and send
+                    threadPool.submit([gameId, res](){
+                        auto connHandle = pool.acquire();
+
+                        try {
+                            pqxx::work txn{*connHandle->get()};
+                            pqxx::result txnResult = txn.exec(pqxx::zview("SELCET * FROM game WHERE id = $1"), pqxx::params(gameId));
+
+                            if(txnResult.empty()) {
+                                res->end("Invalid game requested");
+                                return;
+                            }
+
+                            json gameJson;
+
+                            gameJson["white"] = txnResult[0][1].as<std::string>();
+                            gameJson["black"] = txnResult[0][2].as<std::string>();
+                            gameJson["moves"] = txnResult[0][3].as<std::string>();
+                            gameJson["result"] = txnResult[0][4].as<std::string>();
+                            gameJson["reason"] = txnResult[0][5].as<std::string>();
+
+                            res->end(gameJson.dump());
+                        } catch (std::exception& e) {
+                            std::cerr << "Error in database while fetching game data: " << e.what() << std::endl;
+                        }
+                    });
+                }
+            });
+        }
+    });
+
     app.ws<PlayerData>("/new-game", {
 
         .open = [](auto* ws) {
             std::cout << "reg-game requested\n";
         },
 
-        .message = [](auto* ws, std::string_view msg, uWS::OpCode code) {
-            auto * playerData = ws->getUserData();
+        .message = gameWSMessageHandler,
 
-            std::stringstream ss{std::string(msg)};
-            std::string msgType;
-            ss >> msgType;
-
-            if(msgType == "auth") {
-                std::string token;
-                ss >> token;
-
-                std::string username = getUserNameFromToken(token);
-
-                if(username.length() == 0) {
-                    ws->send("Not authorised", uWS::OpCode::TEXT);
-                    ws->close();
-                }
-                else {
-                    ws->getUserData()->authDone = true;
-                    playerData->name = username;
-                    playerData->ws = ws;
-
-                    if(regWaitingPlayer == nullptr) regWaitingPlayer = playerData;
-                    else startGame(playerData);
-                }
-            }
-
-            else if(msgType == "move") {
-                if(!playerData->authDone) {
-                    ws->send("Not authorised", uWS::OpCode::TEXT);
-                    ws->close();
-                    return;
-                }
-
-                auto & chess = ws->getUserData()->chess;
-
-                try {
-                    std::string move;
-                    ss >> move;
-
-                    chess->makeMove(move);
-
-                    playerData->isMyTurn = false;
-                    playerData->otherWs->getUserData()->isMyTurn = true;
-
-                    // stop current player's timer
-                    playerData->timerData->stopTimer();
-
-                    playerData->ws->send("move:true", code);
-                    playerData->otherWs->send("newmove:" + move, code);
-
-                    // start opponent's timer
-                    playerData->otherWs->getUserData()->timerData->startTimer();
-                    
-                    if(chess->isGameOver()) {
-                        json resultJson;
-                        resultJson["type"] = "result";
-
-                        if(chess->isCheckMate(!playerData->isWhite)) {
-                            resultJson["result"] = "win";
-                            resultJson["reason"] = "Checkmate";
-                            playerData->ws->send(resultJson.dump(), code);
-
-                            resultJson["result"] = "lose";
-                            resultJson["reason"] = "Checkmate";
-                            playerData->otherWs->send(resultJson.dump(), code);
-                        }
-                        else {
-                            resultJson["result"] = "draw";
-                            
-                            if(chess->isStalemate()) resultJson["reason"] = "Stalemate";
-                            else if(chess->isDrawByInsufficientMaterial()) resultJson["reason"] = "Insufficient Material";
-                            else if(chess->isDrawByRepitition()) resultJson["reason"] = "Repitition";
-                            else if(chess->isDrawBy50MoveRule()) resultJson["reason"] = "50 Half Moves";
-
-                            playerData->ws->send(resultJson.dump(), code);
-                            playerData->otherWs->send(resultJson.dump(), code);
-                        }
-
-                        // close client sync timer
-                        us_timer_close(playerData->syncTimer);
-                    }
-
-                } catch(std::exception& e) {
-                    ws->send("move:false", code);
-                    ws->send(std::string("Error:") + e.what(), code);
-                }
-            }
-            else if(msgType == "chat") {
-                if(!playerData->authDone) {
-                    ws->send("Not authorised");
-                    ws->close();
-                    return;
-                }
-
-                ws->getUserData()->otherWs->send(msg);
-            }
-        }
+        .close = gameWScloseHandler
     });
 
     app.ws<PlayerData>("/rand-game", {
@@ -681,11 +1200,55 @@ void registerRoutes(uWS::SSLApp & app) {
             else if(msgType == "chat") {
                 ws->getUserData()->otherWs->send(msg);
             }
+        },
+
+        .close = [](auto * ws, int code, std::string_view data) {
+            auto *playerData = ws->getUserData();
+            json resultJson;
+            resultJson["type"] = "result";
+
+            resultJson["result"] = "win";
+            resultJson["reason"] = "Abandonment";
+            playerData->otherWs->send(resultJson.dump(), uWS::OpCode::TEXT);
         }
     });
 
     app.get("/home", [](auto * res, auto * req) {
-        serveFile("views/index", ".html", res);
+        auto cookies = parseCookies(req->getHeader(("cookie")));
+        auto it = cookies.find("token");
+
+        if(it == cookies.end()) {
+            serveFile("views/index", ".html", res);
+            return;
+        }
+
+        std::string token = it->second;
+
+        try {
+            auto decoded = jwt::decode(token);
+            auto verifier = jwt::verify()
+                                .allow_algorithm(jwt::algorithm::hs256{"your-secret-key"})
+                                .with_issuer("your-issuer");
+
+            verifier.verify(decoded);
+
+            std::string username = decoded.get_payload_claim("username").as_string();
+
+            // see if the user has a game in progress
+            auto it = closedConnections.find(username);
+            if(it == closedConnections.end()) {
+                serveFile("views/index", ".html", res);
+                return;
+            }
+
+            it->second->authDone = true;
+
+            res->writeStatus("200 OK")->end("resume-game " + username);
+        } catch (const std::exception &e) {
+            serveFile("views/index", ".html", res);
+            return;
+        }
+
     });
 
     app.post("/signup", [](auto* res, auto* req) {
@@ -702,6 +1265,10 @@ void registerRoutes(uWS::SSLApp & app) {
                 handleSignupOrLogin(res, data, pool, threadPool, false);
             }
         });
+    });
+
+    app.get("/game", [](auto* res, auto* req) {
+        
     });
 }
 

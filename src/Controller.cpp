@@ -10,11 +10,110 @@
 #include <string>
 
 using json = nlohmann::json;
-PlayerData* waitingPlayer = nullptr, *regWaitingPlayer = nullptr;
+PlayerData* randWaitingPlayer = nullptr, *regWaitingPlayer = nullptr;
 
 const std::string connStr = "host=localhost port=5432 dbname=chess user=postgres password=yourpassword";
 PostgresConnectionPool cPool(10);
 ThreadPool tPool(2);
+
+// JWT secret key
+const std::string jwtSecret = "your_secret_key";
+
+std::unordered_map<std::string, PlayerData*> closedConnections;
+std::unordered_map<int, std::pair<PlayerData*, PlayerData*>> liveGames;
+std::unordered_map<int, PlayerData*> playersInGame;
+
+
+void matchPlayer(PlayerData* newPlayerData, bool randGame) {
+    PlayerData** waitingPlayerRef = randGame ? &randWaitingPlayer : &regWaitingPlayer;
+
+    PlayerData* waitingPlayer = *waitingPlayerRef;
+    
+
+    // Create a random device and a random number generator
+    std::random_device rd;  // Seed
+    std::mt19937 gen(rd()); // Mersenne Twister engine
+
+    // Define the distribution range [1, 20]
+    std::uniform_int_distribution<> dist(1, 20);
+
+    // Generate random number
+    int random_number = dist(gen);
+
+    if(random_number % 2) {
+        if(waitingPlayer->name_ == "") waitingPlayer->name_ = "white";
+        waitingPlayer->isWhite_ = true;
+
+        if(newPlayerData->name_ == "") newPlayerData->name_ = "black";
+        newPlayerData->isWhite_ = false;
+    }
+    else {
+        if(waitingPlayer->name_ == "") waitingPlayer->name_ = "black";
+        waitingPlayer->isWhite_ = false;
+
+        if(newPlayerData->name_ == "") newPlayerData->name_ = "white";
+        newPlayerData->isWhite_ = true;
+    }
+
+    if(waitingPlayer->chess_) newPlayerData->chess_ = waitingPlayer->chess_;
+    else if(newPlayerData->chess_) waitingPlayer->chess_ = newPlayerData->chess_;
+    else waitingPlayer->chess_ = newPlayerData->chess_ = std::make_shared<LC::LegalChess>();
+
+    waitingPlayer->otherWS_ = newPlayerData->ws_;
+    newPlayerData->otherWS_ = waitingPlayer->ws_;
+
+    if(!waitingPlayer->moveTimer_) waitingPlayer->moveTimer_ = std::make_unique<MoveTimer>(300, uv_loop, waitingPlayer);
+    if(!newPlayerData->moveTimer_) newPlayerData->moveTimer_ = std::make_unique<MoveTimer>(300, uv_loop, newPlayerData);
+
+    waitingPlayer->inGame_ = newPlayerData->inGame_ = true;
+
+    tPool.sumbit([waitingPlayerRef, waitingPlayer, newPlayerData](){
+        auto connHandle = cPool.acquire();
+        pqxx::work txn(*connHandle->get());
+
+        pqxx::result txnResult = txn.exec(
+            pqxx::zview("INSERT INTO game (white_id, black_id, move_history, result, reason) "
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id"),
+            pqxx::params(whiteName, blackName, move_history, result, reason)
+        );
+
+        if(txnResult.empty()) {
+            std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+            return;
+        }
+
+        txn.commit();
+
+        json toNewPlayer;
+        toNewPlayer["type"] = "start-game";
+        toNewPlayer["white"] = newPlayerData->isWhite;
+
+        json toWaitingPlayer;
+        toWaitingPlayer["type"] = "start-game";
+        toWaitingPlayer["white"] = waitingPlayer->isWhite;
+
+        std::cout << "player's matched" << std::endl;
+
+        newPlayerData->ws->send(toNewPlayer.dump(), uWS::OpCode::TEXT);
+        waitingPlayer->ws->send(toWaitingPlayer.dump(), uWS::OpCode::TEXT);
+
+        // To-Do: should i call this after starting player timers?
+        newPlayerData->createSyncTimer();
+        waitingPlayer->createSyncTimer(newPlayerData->syncTimer);
+
+        if(waitingPlayer->isWhite_) {
+            waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(txnResult[0][0].as<int>(), waitingPlayer, newPlayerData);
+            waitingPlayer->timerData->startTimer();
+        }
+        else {
+            waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(txnResult[0][0].as<int>(), newPlayerData, waitingPlayer);
+            newPlayerData->timerData->startTimer();
+        }
+
+        // reset the waiting player
+        *waitingPlayerRef = nullptr;
+    });
+}
 
 
 // Helper to parse cookie string
@@ -35,8 +134,9 @@ std::unordered_map<std::string, std::string> parseCookies(std::string_view cooki
     return cookies;
 }
 
-std::string getUserNameFromToken(std::string token) {
+std::pair<int, std::string> getUserNameIDFromToken(std::string token) {
     std::string username = "";
+    int id = -1;
 
     try {
         auto decoded = jwt::decode(token);
@@ -47,90 +147,14 @@ std::string getUserNameFromToken(std::string token) {
 
         verifier.verify(decoded);  // Throws if verification fails
 
-        std::string username = decoded.get_payload_claim("username").as_string();
+        username = decoded.get_payload_claim("username").as_string();
+        id = decoded.get_payload_claim("id").as_string();
 
-        // res->end("Authenticated as: " + username);
     } catch (const std::exception& e) {
         std::cout << "Invalid token: " << e.what() << std::endl;
     }
 
-    return username;
-}
-
-void gameResultDBHandler(int gameID, int whiteID, int blackID, char dbReason, bool isDraw, bool whiteWon) {
-    char gameResult, whiteResult, blackResult;
-    
-    if(isDraw) {
-        gameResult = whiteResult = blackResult = 'd';
-    }
-    else if(whiteWon) {
-        gameResult = whiteResult = 'w';
-        blackResult = "l";
-    }
-    else {
-        gameResult = 'b';
-        whiteResult = 'l';
-        blackResult = 'w';
-    }
-
-    tPool.submit([gameID, whiteID, blackID, dbReason, gameResult, whiteResult, blackResult]() {
-        auto connHandle = pool.acquire();
-        pqxx::work txn(*connHandle->get());
-
-        try {
-            // update table "game"
-            pqxx::result txnResult = txn.exec(
-                pqxx::zview("UPDATE game SET reason = $1, result = $2 WHERE game_id = $3;"),
-                pqxx::params(dbReason, gameResult, gameID)
-            );
-
-            // insert entry into "user_to_game"
-            txn.exec(
-                pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
-                "VALUES ($1, $2, $3)"),
-                pqxx::params(whiteID, gameID, whiteResult)
-            );
-
-            txn.exec(
-                pqxx::zview("INSERT INTO user_to_game (user_id, game_id, result) "
-                "VALUES ($1, $2, $3)"),
-                pqxx::params(blackID, gameID, blackResult)
-            );
-
-            // To-Do: check for "error thrown: "in_doubt_error"
-            txn.commit();
-        } catch (const std::exception& e) {
-            std::cerr << "Error handling db operations of game result of game id: " << gameID << ". " << e.what() << std::endl;
-        }
-    });
-}
-
-void gameResultHandler(bool isDraw, bool whiteWon, std::string_view reason, char dbReason, PlayerData* whiteData, PlayerData* blackData) {
-    json resultJson;
-    resultJson["type"] = "result";
-    resultJson["reason"] = reason;
-
-    if(isDraw) {
-        resultJson["result"] = "draw";
-        whiteData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-        blackData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-        return;
-    }
-    
-    resultJson["result"] = "win";
-
-    if(whiteWon) {
-        whiteData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-        resultJson["result"] = "lose";
-        blackData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-    }
-    else {
-        blackData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-        resultJson["result"] = "lose";
-        whiteData->ws->send(resultJson.dump(), uWS::OpCode::TEXT);
-    }
-
-    gameResultDBHandler(whiteData->gameID_, whiteData->id_, blackData->id_, dbReason, isDraw, whiteWon);
+    return {id, username};
 }
 
 
@@ -146,9 +170,9 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
 
     std::string token = it->second;
 
-    std::string username = getUserNameFromToken(token);
+    auto [id, username] = getUserNameIDFromToken(token);
 
-    if(username.length() == 0) {
+    if(id == -1) {
         std::cout << "Not Authorized to create web socket connection.\n";
     }
 
@@ -156,7 +180,6 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
     /* If we have this header set, it's a websocket */
     std::string_view secWebSocketKey = req->getHeader("sec-websocket-key");
     if (secWebSocketKey.length() == 24) {
-        /* Default handler upgrades to WebSocket */
         std::string_view secWebSocketProtocol = req->getHeader("sec-websocket-protocol");
         std::string_view secWebSocketExtensions = req->getHeader("sec-websocket-extensions");
 
@@ -165,11 +188,28 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
             secWebSocketExtensions = "";
         }
 
-        PlayerData playerData;
-        playerData->name = username;
-        // To-Do: Player Data's id;
+        auto it = closedConnections.find(id);
 
-        res->upgrade(std::move(PlayerData), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
+        if(it != closedConnections.end()) {
+            auto* playerData = it->second;
+            closedConnections.erase(it);
+
+            // stop the running abandon timer
+            playerData->stopAbandonTimer();
+
+            res->upgrade(std::move(*playerData), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
+        }
+        else if(playersInGame.find(id) != playersInGame.end()) {
+            // To-Do: should i refuse the connection or let it play with this new connection?
+            return;
+        }
+        else {
+            PlayerData playerData;
+            playerData.name_ = username;
+            playerData.id_ = id;
+            res->upgrade(std::move(playerData), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
+        }
+
     } else {
         std::cout << "Couldn't create web socket connection. Invalid Web Socket Key.\n";
         /* Tell the router that we did not handle this request */
@@ -177,7 +217,7 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
     }
 }
 
-void gameWSMoveHandler(PlayerData* movedPlayerData, std::string move) {
+void gameMoveHandler(PlayerData* movedPlayerData, std::string move) {
     auto & chess = movedPayerData->chess;
 
     try {
@@ -219,9 +259,80 @@ void gameWSMoveHandler(PlayerData* movedPlayerData, std::string move) {
             whiteData = movedPlayerData->otherWS_->getUserData();
         }
 
-        gameResultHandler(isDraw, whiteWon, reason, dbReason, whiteData, blackData);
+        movedPlayerData->gameManager_->gameResultHandler(isDraw, whiteWon, reason, dbReason, whiteData, blackData);
     }
 }
+
+
+void rematch(PlayerData* p1, PlayerData* p2) {
+    p1->inGame_ = p2->inGame_ = true;
+
+    // Create a random device and a random number generator
+    std::random_device rd;  // Seed
+    std::mt19937 gen(rd()); // Mersenne Twister engine
+
+    // Define the distribution range [1, 20]
+    std::uniform_int_distribution<> dist(1, 20);
+
+    // Generate random number
+    int random_number = dist(gen);
+
+    if(random_number % 2) {
+        p1->isWhite_ = true;
+        p2->isWhite_ = false;
+    }
+    else {
+        p1->isWhite_ = false;
+        p2->isWhite_ = true;
+    }
+
+    tPool.sumbit([p1, p2](){
+        auto connHandle = cPool.acquire();
+        pqxx::work txn(*connHandle->get());
+
+        pqxx::result txnResult = txn.exec(
+            pqxx::zview("INSERT INTO game (white_id, black_id, move_history, result, reason) "
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id"),
+            pqxx::params((p1->isWhite_ ? p1->name_ : p2->name_), (p2->isWhite_ ? p1->name_ : p2->name_), move_history, result, reason)
+        );
+
+        if(txnResult.empty()) {
+            std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+            return;
+        }
+
+        txn.commit();
+
+        json toP1;
+        toP1["type"] = "start-game";
+        toP1["white"] = p1->isWhite;
+
+        json toP2;
+        toP2["type"] = "start-game";
+        toP2["white"] = p2->isWhite;
+
+        std::cout << "player's re-matched" << std::endl;
+
+        p1->ws->send(toP1.dump(), uWS::OpCode::TEXT);
+        p2->ws->send(toP2.dump(), uWS::OpCode::TEXT);
+
+
+        // It is assumed that all the relvant data of both players and game is reset
+
+        if(p1->isWhite) {
+            p1->gameManager_->whiteData_ = p1;
+            p1->gameManager_->blackData_ = p2;
+            p1->moveTimer->start();
+        }
+        else {
+            p1->gameManager_->whiteData_ = p2;
+            p1->gameManager_->blackData_ = p1;
+            p2->moveTimer->start();
+        }
+    });
+
+}
+
 
 void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::string_view msg, uWS::OpCode code) {
     auto* movedPlayerData = ws->getUserData();
@@ -255,9 +366,79 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         }
         else gameResultHandler(false, movedPlayerData->isWhite_ == false, "Resigned", "R", movedPlayerData, movedPlayerData->otherWS_->getUserData());
     }
+    // "req-" and "res-" comes to server from users
+    else if(msgType == "req-rematch") {
+        // if other player exited
+        if(!movedPlayerData->otheWS_) {
+            ws->send("rn", uWS::OpCode::TEXT);
+            return;
+        }
+
+        // if other player is already in a game
+        if(movedPlayerData->otherWS_->getUserData()->inGame_) {
+            ws->send("rg", uWS::OpCode::TEXT);
+            return;
+        }
+
+        movedPlayerData->askedRematch_ = true;
+        movedPlayerData->otherWS_->send("rematch");
+    }
+    else if(msgType == "res-rematch") {
+        // suspicious event or the rematch is already begun
+        if(!movedPlayerData->otherWS_->geUserData()->askedRematch_) {
+            return;
+        }
+
+        std::string response;
+        ss >> response;
+
+        // accepted Rematch
+        if(response == "a") {
+            rematch(movedPlayerData, movedPlayerData->otherWS_->getUserData());
+            movedPlayerData->otherWS_->geUserData()->askedRematch_ = false;
+            movedPlayerData->askedRematch_ = false;
+        }
+        else {
+            movedPlayerData->other_WS_->send("rr");
+        }
+
+        // reset rematch status
+        movedPlayerData->otherWS_->geUserData()->askedRematch_ = false;
+    }
+    else if(msgType == "new-game") {
+        if(movedPlayerData->inGame_) return;
+
+        movedPlayerData->inGame_ = true;
+
+        if(regWaitingPlayer) matchPlayer(movedPlayerData);
+        else regWaitingPlayer = movedPlayerData;
+    }
 }
 
-void randGameWSMoveHandler(PlayerData* movedPlayerData, std::string move) {
+
+void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerData> * ws) {
+    auto * newData = ws->getUserData();
+
+    // if a reconnection is happening
+    if(newData->inGame_) {
+        if(newData->otherWS_) {
+            newData->otherWs_->getUserData()->ws_ = ws;
+        }
+        return;
+    }
+
+    PlayerData** waitingPlayer = newData->name == "" ? &randWaitingPlayer : &regWaitingPlayer;
+
+    if(*waitingPlayer) {
+        matchPlayer(newData, false);
+    }
+    else {
+        *waitingPlayer = newData;
+    }
+}
+
+
+void randGameMoveHandler(PlayerData* movedPlayerData, std::string move) {
     auto & chess = movedPayerData->chess_;
     
     try {
@@ -272,25 +453,18 @@ void randGameWSMoveHandler(PlayerData* movedPlayerData, std::string move) {
 
     // if opponent is checkmated
     if(chess->isCheckmate(!movedPlayerData->isWhite_)) {
-        resultJson["reason"] = "Checkmate";
-        resultJson["result"] = "win";
-
-        movedPlayerData->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-
-        resultJson["result"] = "lose";
-
-        movedPlayerData->otherWs_->send(resultJson.dump(), uWS::OpCode::TEXT);
+        movedPlayerData->gameManager_->randGameResultHandler(false, movedPlayerData->isWhite, "Checkmate");
     }
     // game is drawn
     else {
-        resultJson["result"] = "draw";
-        if(chess->isStalemate()) resultJson["reason"] = "Stalemate";
-        else if(chess->isDrawByInsufficientMaterial()) resultJson["reason"] = "Insufficient Material";
-        else if(chess->isDrawByRepitition()) resultJson["reason"] = "Repitition";
-        else if(chess->isDrawBy50MoveRule()) resultJson["reason"] = "50 Half Moves";
+        std::string reason;
 
-        movedPlayerData->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        movedPlayerData->otherWs_->send(resultJson.dump(), uWS::OpCode::TEXT);
+        if(chess->isStalemate()) reason = "Stalemate";
+        else if(chess->isDrawByInsufficientMaterial()) reason = "Insufficient Material";
+        else if(chess->isDrawByRepitition()) reason = "Repitition";
+        else if(chess->isDrawBy50MoveRule()) reason = "50 Half Moves";
+
+        movedPlayerData->gameManager_->randGameResultHandler(true, false, reason);
     }
 }
 
@@ -340,3 +514,17 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
         }
     }
 }
+
+void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, std::string_view msg) {
+    if(!ws->getUserData()->inGame_) return;
+
+    // store the player data
+    PlayerData* playerData = new PlayerData(std::move(*ws->getUserData()));
+    playerData->ws_ = playerData->otherWS_->getUserData()->otherWS_ = nullptr;
+
+    closedConnections.insert({playerData->id_, playerData});
+
+    playerData->startAbandonTimer();
+
+    std::cout << "Connection Closed: " << playerData->name << '\n';
+} 

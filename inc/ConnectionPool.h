@@ -1,3 +1,5 @@
+#pragma once
+
 #include <pqxx/pqxx>
 #include <queue>
 #include <mutex>

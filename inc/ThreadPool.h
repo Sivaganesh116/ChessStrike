@@ -1,5 +1,4 @@
-#ifndef __THREAD_POOL_H__
-#define __THREAD_POOL_H__
+#pragma once
 
 #include <iostream>
 #include <thread>
@@ -50,5 +49,3 @@ public:
         if (running.load()) shutdown();
     }
 };
-
-#endif

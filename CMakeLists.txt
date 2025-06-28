@@ -6,7 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 
-add_executable(chess_strike src/main.cpp)
+add_executable(chess_strike 
+    src/main.cpp
+    src/Controller.cpp
+    src/Data.cpp
+    src/Routes.cpp
+)
 
 # Set compiler flags
 # target_compile_options(chess_strike PRIVATE

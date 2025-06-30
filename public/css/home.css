@@ -1,0 +1,233 @@
+/* General Styling */
+:root {
+    --primary-bg: #1e1e2e;
+    --secondary-bg: #28283d;
+    --border-color: #4a4a68;
+    --text-color: #cdd6f4;
+    --text-accent: #f5c2e7;
+    --green: #a6e3a1;
+    --red: #f38ba8;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--primary-bg);
+    color: var(--text-color);
+}
+
+a {
+    color: var(--text-accent);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Header and Navigation */
+header {
+    background-color: var(--secondary-bg);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 2rem;
+}
+
+nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    height: 60px;
+}
+
+.logo {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: var(--text-color);
+}
+.logo:hover {
+    text-decoration: none;
+}
+
+.nav-right {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+#auth-links .nav-button {
+    padding: 8px 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    margin-left: 10px;
+}
+#auth-links .nav-button.signup {
+    background-color: var(--text-accent);
+    color: var(--primary-bg);
+    border-color: var(--text-accent);
+}
+#auth-links .nav-button.signup:hover {
+    opacity: 0.9;
+    text-decoration: none;
+}
+
+
+/* Profile Dropdown */
+#profile-section img {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid var(--border-color);
+}
+#profile-dropdown {
+    position: absolute;
+    top: 50px;
+    right: 0;
+    background-color: var(--secondary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    width: 160px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+}
+#profile-dropdown a {
+    padding: 12px 16px;
+    display: block;
+    color: var(--text-color);
+}
+#profile-dropdown a:hover {
+    background-color: #3b3b57;
+    text-decoration: none;
+}
+
+/* Main Content Layout */
+.container {
+    display: flex;
+    padding: 2rem;
+    gap: 2rem;
+    align-items: flex-start;
+}
+
+.left-column {
+    flex: 1;
+}
+
+.right-column {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+/* Card Styling */
+.card {
+    background-color: var(--secondary-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem;
+    border-bottom: 1px solid var(--border-color);
+}
+.card-header h2 {
+    font-size: 1.2rem;
+}
+.card-header .controls button {
+    background: none;
+    border: none;
+    color: var(--text-color);
+    font-size: 1.2rem;
+    cursor: pointer;
+    margin-left: 10px;
+}
+
+.card-content {
+    padding: 1rem;
+}
+
+/* Live Games List */
+.live-game-item {
+    display: block;
+    padding: 12px;
+    border-bottom: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+.live-game-item:last-child {
+    border-bottom: none;
+}
+.live-game-item:hover {
+    background-color: #3b3b57;
+    text-decoration: none;
+}
+.live-game-players {
+    display: flex;
+    flex-direction: column;
+}
+.live-game-players span {
+    font-size: 1rem;
+}
+
+/* Play Button */
+.button-primary {
+    display: block;
+    width: 100%;
+    padding: 1rem;
+    font-size: 1.2rem;
+    font-weight: bold;
+    text-align: center;
+    background-color: var(--green);
+    color: var(--primary-bg);
+    border-radius: 5px;
+    border: none;
+    cursor: pointer;
+}
+.button-primary:hover {
+    opacity: 0.9;
+    text-decoration: none;
+}
+
+/* Game History */
+.history-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: 1rem;
+    padding: 8px 0;
+    align-items: center;
+}
+.history-grid.header {
+    font-weight: bold;
+    color: #89b4fa; /* A different accent color for headers */
+    border-bottom: 2px solid var(--border-color);
+}
+.history-item {
+    border-bottom: 1px solid var(--border-color);
+}
+.history-item:last-child {
+    border-bottom: none;
+}
+
+.result-col, .date-col {
+    text-align: center;
+}
+
+.show-more {
+    display: block;
+    text-align: center;
+    margin-top: 1rem;
+    font-weight: bold;
+}

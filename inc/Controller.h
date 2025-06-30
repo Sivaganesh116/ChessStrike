@@ -6,7 +6,7 @@
 
 #include <string>
 
-void serveFile(std::string fileName, std::string ext, uWS::HttpResponse<true>* res);
+void serveFile(std::string filePath, uWS::HttpResponse<true>* res);
 
 std::string createJWT(int userID, const std::string& username);
 
@@ -36,16 +36,14 @@ void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData>* ws, int code, st
 void watchWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req, struct us_socket_context_t * context);
 
 
-void handleSignupOrLogin(uWS::HttpResponse<true>* res, std::string_view body, bool isSignup);
+void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, std::string_view body, bool isSignup);
 
-void httpResOnDataHandler(std::string_view data, bool isLast);
+void getLiveGamesHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int numGames);
 
-void getLiveGamesHandler(uWS::HttpResponse<true>* res, int numGames);
+void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int userID, int batchNumber, int numGames);
 
-void gameHistoryHandler(uWS::HttpResponse<true>* res, int userID, int batchNumber, int numGames);
-
-void getPlayerProfile(uWS::HttpResponse<true>* res, std::string username);
+void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, std::string username);
 
 std::string getLiveGameOfUser(int userID);
 
-void getGameHandler(uWS::HttpResponse<true>* res, int gameID, int reqUserID);
+void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int gameID, int reqUserID);

@@ -13,7 +13,7 @@
 using json = nlohmann::json;
 PlayerData* randWaitingPlayer = nullptr, *regWaitingPlayer = nullptr;
 
-const std::string connStr = "host=localhost port=5432 dbname=chess user=postgres password=yourpassword";
+const std::string connStr = "host=localhost port=5432 dbname=chessstrike user=postgres password=root";
 PostgresConnectionPool cPool(connStr, 10);
 ThreadPool tPool(2);
 
@@ -24,27 +24,49 @@ std::unordered_map<int, PlayerData*> closedConnections;
 std::unordered_map<int, GameManager*> liveGames;
 std::unordered_map<int, GameManager*> playersInGame;
 
+extern std::shared_ptr<uv_loop_t> uv_loop;
 
-void serveFile(std::string fileName, std::string ext, uWS::HttpResponse<true>* res) {
-    if(!ext.size()) return;
-    if(!fileName.size()) return;
 
-    std::ifstream file(fileName + ext);
+// Helper function to determine the content type from a file extension
+std::string getMimeType(const std::string& path) {
+    // A simple map for common web file types
+    static const std::map<std::string, std::string> mime_map = {
+        {".html", "text/html"},
+        {".css", "text/css"},
+        {".js", "application/javascript"},
+        {".png", "image/png"},
+        {".jpg", "image/jpeg"},
+        {".gif", "image/gif"}
+    };
+    
+    size_t pos = path.rfind('.');
+    if (pos != std::string::npos) {
+        std::string ext = path.substr(pos);
+        if (mime_map.count(ext)) {
+            return mime_map.at(ext);
+        }
+    }
+    return "application/octet-stream"; // Default binary type
+}
 
-    if(!file.is_open()) {
-        std::cout << "Cannot open file: " << fileName + ext << std::endl;
+
+void serveFile(std::string filePath, uWS::HttpResponse<true>* res) {
+    // Try to open and read the file
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file) {
+        // File not found, send a 404 response
+        res->writeStatus("404 Not Found");
+        res->end("File not found");
         return;
     }
 
-    std::string fileData = "";
-    std::string line = "";
+    // Read the entire file into a string stream
+    std::stringstream buffer;
+    buffer << file.rdbuf();
 
-    while(std::getline(file, line)) {
-        fileData += line;
-    }
-
-    res->writeHeader("Content-Type", ext);
-    res->end(fileData);
+    // Send the response with the correct MIME type
+    res->writeHeader("Content-Type", getMimeType(filePath));
+    res->write(buffer.str());
 }
 
 std::string createJWT(int userID, const std::string& username) {
@@ -109,22 +131,22 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
     waitingPlayer->otherWS_ = newPlayerData->ws_;
     newPlayerData->otherWS_ = waitingPlayer->ws_;
 
-    if(!waitingPlayer->moveTimer_) waitingPlayer->moveTimer_ = std::make_unique<MoveTimer>(300, (uv_loop_t*)uWS::Loop::get(), waitingPlayer);
-    if(!newPlayerData->moveTimer_) newPlayerData->moveTimer_ = std::make_unique<MoveTimer>(300, (uv_loop_t*)uWS::Loop::get(), newPlayerData);
+    if(!waitingPlayer->moveTimer_) waitingPlayer->moveTimer_ = std::make_unique<MoveTimer>(300, uv_loop.get(), waitingPlayer);
+    if(!newPlayerData->moveTimer_) newPlayerData->moveTimer_ = std::make_unique<MoveTimer>(300, uv_loop.get(), newPlayerData);
 
     waitingPlayer->inGame_ = newPlayerData->inGame_ = true;
 
     tPool.submit([waitingPlayerRef, waitingPlayer, newPlayerData, randGame](){
         int gameID = -1;
 
-        if(randGame) {
+        if(!randGame) {
             auto connHandle = cPool.acquire();
             pqxx::work txn(*connHandle->get());
 
             pqxx::result txnResult = txn.exec(
                 pqxx::zview("INSERT INTO game (white_name, black_name) "
                 "VALUES ($1, $2) RETURNING id"),
-                pqxx::params(waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_, waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_)
+                pqxx::params((waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_), (!waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_))
             );
 
             if(txnResult.empty()) {
@@ -137,27 +159,16 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
             txn.commit();
         }
 
-        json toNewPlayer;
-        toNewPlayer["type"] = "start-game";
-        toNewPlayer["white"] = newPlayerData->isWhite_;
+        waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(gameID, waitingPlayer, newPlayerData);
 
-        json toWaitingPlayer;
-        toWaitingPlayer["type"] = "start-game";
-        toWaitingPlayer["white"] = waitingPlayer->isWhite_;
+        std::stringstream toNewPlayer;
+        toNewPlayer << "start-game" << " " << newPlayerData->gameManager_->sGameID_ << " " << (newPlayerData->isWhite_ ? "w" : "b") << " " << waitingPlayer->name_ << " " << "300"; 
 
-        std::cout << "player's matched" << std::endl;
+        std::stringstream toWaitingPlayer;
+        toWaitingPlayer << "start-game" << " " << waitingPlayer->gameManager_->sGameID_ << " " << (waitingPlayer->isWhite_ ? "w" : "b") << " " << newPlayerData->name_ << " " << "300"; 
 
-        newPlayerData->ws_->send(toNewPlayer.dump(), uWS::OpCode::TEXT);
-        waitingPlayer->ws_->send(toWaitingPlayer.dump(), uWS::OpCode::TEXT);
-
-        if(waitingPlayer->isWhite_) {
-            waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(gameID, waitingPlayer, newPlayerData);
-            waitingPlayer->moveTimer_->start();
-        }
-        else {
-            waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(gameID, newPlayerData, waitingPlayer);
-            newPlayerData->moveTimer_->start();
-        }
+        newPlayerData->ws_->send(toNewPlayer.str(), uWS::OpCode::TEXT);
+        waitingPlayer->ws_->send(toWaitingPlayer.str(), uWS::OpCode::TEXT);
 
         playersInGame.insert({waitingPlayer->id_, waitingPlayer->gameManager_.get()});
         playersInGame.insert({newPlayerData->id_, newPlayerData->gameManager_.get()});
@@ -166,27 +177,52 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
 
         // reset the waiting player
         *waitingPlayerRef = nullptr;
+
+        if(waitingPlayer->isWhite_) {
+            waitingPlayer->moveTimer_->start();
+        }
+        else {
+            newPlayerData->moveTimer_->start();
+        }
     });
 }
 
 
-// Helper to parse cookie string
 std::unordered_map<std::string, std::string> parseCookies(std::string_view cookieHeader) {
     std::unordered_map<std::string, std::string> cookies;
     size_t pos = 0;
+
     while (pos < cookieHeader.size()) {
+        // Find '=' separating key and value
         size_t eq = cookieHeader.find('=', pos);
         if (eq == std::string_view::npos) break;
+
+        // Find end of this cookie (next ';' or end of string)
         size_t end = cookieHeader.find(';', eq);
         if (end == std::string_view::npos) end = cookieHeader.size();
+
+        // Extract and trim key and value
         std::string key = std::string(cookieHeader.substr(pos, eq - pos));
         std::string value = std::string(cookieHeader.substr(eq + 1, end - eq - 1));
+
+        // trim whitespace from key and value
+        key.erase(0, key.find_first_not_of(" \t"));
+        key.erase(key.find_last_not_of(" \t") + 1);
+        value.erase(0, value.find_first_not_of(" \t"));
+        value.erase(value.find_last_not_of(" \t") + 1);
+
         cookies[key] = value;
-        pos = end + 2; // skip "; "
+
+        // Move to next cookie, skip semicolon if present
+        pos = (end < cookieHeader.size()) ? end + 1 : cookieHeader.size();
+
+        // Skip any whitespace
+        while (pos < cookieHeader.size() && std::isspace(cookieHeader[pos])) ++pos;
     }
 
     return cookies;
 }
+
 
 std::pair<int, std::string> getUserNameIDFromToken(std::string token) {
     std::string username = "";
@@ -197,7 +233,7 @@ std::pair<int, std::string> getUserNameIDFromToken(std::string token) {
 
         auto verifier = jwt::verify()
             .allow_algorithm(jwt::algorithm::hs256{jwtSecret})
-            .with_issuer("chess-server");
+            .with_issuer("chess-strike");
 
         verifier.verify(decoded);  // Throws if verification fails
 
@@ -209,31 +245,6 @@ std::pair<int, std::string> getUserNameIDFromToken(std::string token) {
     }
 
     return {id, username};
-}
-
-
-void httpResOnDataHandler(std::string_view data, bool isLast) {
-    // if(isLast) {
-    //     // check if the user is already logged in
-    //     auto cookies = parseCookies(req->getHeader(("cookie")));
-    //     auto it = cookies.find("token");
-
-    //     if(it == cookies.end()) {
-    //         // To-Do: serve signup version of page
-    //         return;
-    //     }
-
-    //     std::string token = it->second;
-
-    //     auto [id, username] = getUserNameIDFromToken(token);
-
-    //     if(id == -1) {
-    //         // To-Do: serve signup version of page
-    //         return;
-    //     }
-
-    //     // To-Do: serve logged in version of page
-    // }
 }
 
 
@@ -283,7 +294,7 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
         }
         else if(playersInGame.find(id) != playersInGame.end()) {
             // To-Do: should i refuse the connection or let it play with this new connection?
-            res->end("You are already playing in the requested game. Please switch back to the running game's tab.");
+            res->writeHeader("Content-Type", "text/plain")->end("You are already playing in the requested game. Please switch back to the running game's tab.");
             return;
         }
         else {
@@ -312,9 +323,12 @@ void gameMoveHandler(uWS::WebSocket<true, true, PlayerData>* ws, PlayerData* mov
         chess->makeMove(move);
     } catch(std::exception& e) {
         std::cout << "Invalid Move Received: " << e.what() << std::endl;
+        ws->send("move false ", uWS::OpCode::TEXT);
         return;
     }
-    movedPlayerData->otherWS_->send("move " + move, uWS::OpCode::TEXT);
+    movedPlayerData->otherWS_->send("newmove " + move, uWS::OpCode::TEXT);
+
+    ws->send("move true", uWS::OpCode::TEXT);
     ws->publish(movedPlayerData->gameManager_->sGameID_, "move " + move, uWS::OpCode::TEXT);
 
     if(chess->isGameOver()) {
@@ -436,7 +450,6 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 
         liveGames.insert({txnResult[0][0].as<int>(), p1->gameManager_.get()});
     });
-
 }
 
 
@@ -542,10 +555,17 @@ void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerData> * ws) {
         if(newData->otherWS_) {
             newData->otherWS_->getUserData()->ws_ = ws;
         }
+        newData->ws_ = ws;
+
+        std::stringstream reconnectData;
+        reconnectData << "reconnection" << " " << (newData->isWhite_ ? "w" : "b") << " " << (newData->isWhite_ ? newData->gameManager_->blackData_->name_ : newData->gameManager_->whiteData_->name_) << " " << "300" << " " << "300" << " " << (newData->isMyTurn_ ? (newData->isWhite_ ? "w" : "b") : (newData->isWhite_ ? "b" : "w")) << " " << newData->chess_->getMoveHistory();
+        ws->send(reconnectData.str(), uWS::OpCode::TEXT);
+        
         return;
     }
 
     PlayerData** waitingPlayer = newData->name_ == "" ? &randWaitingPlayer : &regWaitingPlayer;
+    newData->ws_ = ws;
 
     if(*waitingPlayer) {
         matchPlayer(newData, false);
@@ -608,55 +628,37 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
 
         ws->getUserData()->otherWS_->send(msg);
     }
-    else if(msgType == "draw") {
+    else if(msgType == "req-draw") {
         if(!movedPlayerData->inGame_) return;
 
-        movedPlayerData->offeredDraw_ = !movedPlayerData->offeredDraw_;
+        movedPlayerData->offeredDraw_ = true;
         ws->getUserData()->otherWS_->send(msg);
     }
-    else if(msgType == "result") {
+    else if(msgType == "res-draw") {
+        std::string res;
+        ss >> res;
+
+        if(res == "a") movedPlayerData->gameManager_->randGameResultHandler(true, false, "Agreement");
+        else {
+            movedPlayerData->otherWS_->getUserData()->offeredDraw_ = false;
+            movedPlayerData->otherWS_->send("dr"); // draw reject
+        }
+    }
+    else if(msgType == "resign") {
         if(!movedPlayerData->inGame_) return;
 
-        std::string result;
-        ss >> result;
-
-        json resultJson;
-        resultJson["type"] = "result";
-
-        if(result == "d") {
-            if(movedPlayerData->otherWS_->getUserData()->offeredDraw_) {
-                resultJson["result"] = "draw";
-                resultJson["reason"] = "Agreement";
-
-                movedPlayerData->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-                movedPlayerData->otherWS_->send(resultJson.dump(), uWS::OpCode::TEXT);
-            }
-        }
-        else {
-            resultJson["result"] = "lose";
-            resultJson["reason"] = "Resignation";
-
-            movedPlayerData->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-
-            resultJson["result"] = "win";
-            movedPlayerData->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        }
+        movedPlayerData->gameManager_->randGameResultHandler(false, !movedPlayerData->isWhite_, "Resignation");
     }
     // "req-" and "res-" comes to server from users
     else if(msgType == "req-rematch") {
         if(movedPlayerData->inGame_) return;
 
-        // if other player exited
-        if(!movedPlayerData->otherWS_) {
-            ws->send("rn", uWS::OpCode::TEXT);
+        // if other player exited or already in game
+        if(!movedPlayerData->otherWS_ || movedPlayerData->otherWS_->getUserData()->inGame_) {
+            ws->send("rn", uWS::OpCode::TEXT); // not available
             return;
         }
 
-        // if other player is already in a game
-        if(movedPlayerData->otherWS_->getUserData()->inGame_) {
-            ws->send("rg", uWS::OpCode::TEXT);
-            return;
-        }
 
         movedPlayerData->askedRematch_ = true;
         movedPlayerData->otherWS_->send("rematch");
@@ -679,7 +681,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
             movedPlayerData->askedRematch_ = false;
         }
         else {
-            movedPlayerData->otherWS_->send("rr");
+            movedPlayerData->otherWS_->send("rr"); // rematch reject
         }
 
         // reset rematch status
@@ -700,7 +702,11 @@ void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, s
 
     // store the player data
     PlayerData* playerData = new PlayerData(std::move(*ws->getUserData()));
-    playerData->ws_ = playerData->otherWS_->getUserData()->otherWS_ = nullptr;
+    playerData->ws_ = nullptr;
+    
+    if(playerData->isWhite_) playerData->gameManager_->blackData_->otherWS_ = nullptr;
+    else playerData->gameManager_->whiteData_->otherWS_ = nullptr;
+
 
     closedConnections.insert({playerData->id_, playerData});
 
@@ -710,7 +716,7 @@ void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, s
 } 
 
 
-void handleSignupOrLogin(uWS::HttpResponse<true>* res, std::string_view body, bool isSignup) {
+void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, std::string_view body, bool isSignup) {
     // Expecting body in format: username=<username>&password=<password>
     std::string bodyStr(body);
     std::unordered_map<std::string, std::string> form;
@@ -725,112 +731,131 @@ void handleSignupOrLogin(uWS::HttpResponse<true>* res, std::string_view body, bo
 
     if(form.count("username") == 0 || form.count("password") == 0) {
         std::cout << "No credentials in body for signup or login\n";
-        res->writeStatus("404 Bad Request")->end("No credentials available.");
+
+        if(!*aborted)
+            res->writeStatus("404 Bad Request")->writeHeader("Content-Type", "text/plain")->end("No credentials available.");
     }
 
     std::string username = form["username"];
     std::string password = form["password"];
 
-    tPool.submit([res, username, password, isSignup]() {
+    tPool.submit([aborted, res, username, password, isSignup]() {
+        std::string token;
         try {
             auto connHandle = cPool.acquire();
             pqxx::work txn(*connHandle->get());
 
             if (isSignup) {
-                pqxx::zview query("SELECT username FROM player WHERE username = $1");
+                pqxx::zview query("SELECT user_name FROM player WHERE user_name = $1");
                 pqxx::params params(username);
                 pqxx::result r = txn.exec(query, params);
 
                 if (!r.empty()) {
-                    res->writeStatus("409 Conflict")->end("Username already exists.");
+                    if(!*aborted)
+                        res->writeStatus("409 Conflict")->writeHeader("Content-Type", "text/plain")->end("User already exists");
                     return;
                 }
 
 
-                pqxx::result tranResult = txn.exec(pqxx::zview("INSERT INTO player (username, password) VALUES ($1, $2) RETURNING id"), pqxx::params(username, password));
+                pqxx::result tranResult = txn.exec(pqxx::zview("INSERT INTO player (user_name, password) VALUES ($1, $2) RETURNING id"), pqxx::params(username, password));
                 txn.commit();
                 
                 int userID = tranResult[0][0].as<int>();
 
-                std::string token = createJWT(userID, username);
-
-                json userJson;
-                userJson["token"] = token;
-                userJson["name"] = username;
-                userJson["id"] = userID;
-
-                res->writeHeader("Content-Type", "json");
-                res->write(userJson.dump());
+                token = createJWT(userID, username);
             } else {
-                pqxx::zview query = "SELECT (id, password) FROM player WHERE username = $1";
+                pqxx::zview query = "SELECT id, password FROM player WHERE user_name = $1";
                 pqxx::params params(username);
                 
                 pqxx::result r = txn.exec(query, params);
+
                 if (r.empty() || r[0][1].as<std::string>() != password) {
-                    res->writeStatus("401 Unauthorized")->end("Invalid credentials.");
+                    if(!*aborted)
+                        res->writeStatus("401 Unauthorized")->writeHeader("Content-Type", "text/plain")->end("Invalid credentials.");
+
                     return;
                 }
 
                 int userID = r[0][0].as<int>();
 
-                std::string token = createJWT(userID, username);
+                token = createJWT(userID, username);
+            }
 
-                json userJson;
-                userJson["token"] = token;
-                userJson["name"] = username;
-                userJson["id"] = userID;
-
-                res->writeHeader("Content-Type", "json");
-                res->write(userJson.dump());
+            if(!*aborted) {
+                // add Secure in cookie when https is implemented
+                res->writeHeader("Set-Cookie", "token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Expires=Wed, 01 Jul 2025 00:00:00 GMT");
+                res->writeHeader("Content-Type", "application/json");
+                json j;
+                j["username"] = username;
+                res->end(j.dump());
             }
         } catch (const std::exception& e) {
-            res->writeStatus("500 Internal Server Error")->end("Database error.");
+            std::cerr << "Error in login/signup: " << e.what() << '\n';
+            if(!*aborted) {
+                res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
+            }
         }
     });
 }
 
-void gameHistoryHandler(uWS::HttpResponse<true>* res, int userID, int batchNumber, int numGames) {
+void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int userID, int batchNumber, int numGames) {
     tPool.submit([=]() {
         auto connHandle = cPool.acquire();
         pqxx::work txn{*connHandle->get()};
 
-        pqxx::result allGames = txn.exec(pqxx::zview("SELECT game_id from user_to_table WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT $3"), pqxx::params(userID, batchNumber*20, numGames));
+        try {
+            pqxx::result allGames = txn.exec(pqxx::zview("SELECT game_id from user_to_game WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT $3"), pqxx::params(userID, batchNumber*20, numGames));
 
-        json gamesJson;
-        gamesJson["games"] = json::array();
+            json gamesJson;
+            gamesJson["games"] = json::array();
 
-        std::string gamesList = "";
+            std::string gamesList = "";
 
-        for(auto row : allGames) {
-            std::string sGameID = row[0].as<std::string>();
+            for(auto row : allGames) {
+                std::string sGameID = row[0].as<std::string>();
 
-            gamesList += sGameID;
-            gamesList.push_back(',');
+                gamesList += sGameID;
+                gamesList.push_back(',');
+            }
+
+            if(gamesList.length()) {
+                gamesList.pop_back();
+                std::cout << "Games: " << gamesList << '\n';
+
+                pqxx::result gamesResult = txn.exec(pqxx::zview("SELECT white_name, black_name, result, reason, created_at FROM game WHERE id in ($1)"), pqxx::params());
+
+                json gameJson;
+                for(auto game : gamesResult) {
+                    gameJson["white"] = game[0].as<std::string>();
+                    gameJson["black"] = game[1].as<std::string>();
+                    gameJson["result"] = game[2].as<std::string>();
+                    gameJson["reason"] = game[3].as<std::string>();
+                    gameJson["created_at"] = game[4].as<std::string>();
+
+                    gamesJson["games"].push_back(gameJson);
+                }
+                if(!*aborted) {
+                    res->writeHeader("Content-Type", "json/application");
+                    res->end(gamesJson.dump());
+                }
+            }
+            else {
+                if(!*aborted) {
+                    res->writeHeader("Content-Type", "json/application");
+                    res->end("{}");
+                }
+            }
+        } catch(std::exception& e) {
+            std::cerr << "Error in game history: " << e.what() << std::endl;
+            if(!*aborted) {
+                res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
+            }
         }
-
-        gamesList.pop_back();
-        std::cout << "Games: " << gamesList << '\n';
-
-        pqxx::result gamesResult = txn.exec(pqxx::zview("SELECT white_name, black_name, result, reason, created_at FROM game WHERE id in (" + gamesList + ")"));
-
-        json gameJson;
-        for(auto game : gamesResult) {
-            gameJson["white"] = game[0].as<std::string>();
-            gameJson["black"] = game[1].as<std::string>();
-            gameJson["result"] = game[2].as<std::string>();
-            gameJson["reason"] = game[3].as<std::string>();
-            gameJson["created_at"] = game[4].as<std::string>();
-
-            gamesJson["games"].push_back(gameJson);
-        }
-
-        res->writeHeader("Content-Type", "json");
-        res->write(gamesJson.dump());
     });
 }
 
 
-void getLiveGamesHandler(uWS::HttpResponse<true>* res, int numGames) {
+void getLiveGamesHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int numGames) {
     json liveGamesJson;
     liveGamesJson["games"] = json::array();
 
@@ -846,13 +871,15 @@ void getLiveGamesHandler(uWS::HttpResponse<true>* res, int numGames) {
         if(numGames == 0) break;
     }
 
-    res->writeHeader("Content-Type", "json");
-    res->write(liveGamesJson.dump());
+    if(!*aborted) {
+        res->writeHeader("Content-Type", "application/json");
+        res->end(liveGamesJson.dump());
+    }
 }
 
-void getPlayerProfile(uWS::HttpResponse<true>* res, std::string username) {
+void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, std::string username) {
     if(username.length() == 0) {
-        res->write("Player doesn't exist. Please check the username.");
+        res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Player doesn't exist. Please check the username.");
         return;
     }   
 
@@ -860,59 +887,70 @@ void getPlayerProfile(uWS::HttpResponse<true>* res, std::string username) {
         auto connHandle = cPool.acquire();
         pqxx::work txn{*connHandle->get()};
 
-        pqxx::result r = txn.exec(pqxx::zview("SELECT id FROM player WHERE user_name = $1"), pqxx::params(username));
+        try {
+            pqxx::result r = txn.exec(pqxx::zview("SELECT id, joined_on FROM player WHERE user_name = $1"), pqxx::params(username));
 
-        if(r.size() == 0) {
-            res->write("Player doesn't exist. Please check the username.");
-            return;
+            if(r.size() == 0) {
+                if(!*aborted)
+                    res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Player doesn't exist. Please check the username.");
+                return;
+            }
+
+            int userID = r[0][0].as<int>();
+
+            pqxx::result allGames = txn.exec(pqxx::zview("SELECT game_id, result from user_to_game WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT $3"), pqxx::params(userID, 0, 20));
+            
+            std::string gamesList = "";
+            int numWon = 0, numLost = 0;
+
+            json profileJson;
+
+            profileJson["name"] = username;
+            profileJson["id"] = userID;
+            profileJson["joined_on"] = r[0][1].as<std::string>();
+
+            for(auto row : allGames) {
+                std::string sGameID = row[0].as<std::string>();
+
+                gamesList += sGameID;
+                gamesList.push_back(',');
+
+                if(row[1].as<std::string>() == "won") numWon++;
+                else if(row[1].as<std::string>() == "lost") numLost++;
+            }
+            gamesList.pop_back();
+
+
+            profileJson["games"] = json::array();
+            profileJson["total"] = allGames.size();
+            profileJson["won"] = numWon;
+            profileJson["lost"] = numLost;
+
+            std::cout << "Games: " << gamesList << '\n';
+
+            pqxx::result gamesResult = txn.exec(pqxx::zview("SELECT white_name, black_name, result, reason, created_at FROM game WHERE id in (" + gamesList + ")"));
+
+            json gameJson;
+            for(auto game : gamesResult) {
+                gameJson["white"] = game[0].as<std::string>();
+                gameJson["black"] = game[1].as<std::string>();
+                gameJson["result"] = game[2].as<std::string>();
+                gameJson["reason"] = game[3].as<std::string>();
+                gameJson["created"] = game[4].as<std::string>();
+
+                profileJson["games"].push_back(gameJson);
+            }
+
+            if(!*aborted){
+                res->writeHeader("Content-Type", "application/json");
+                res->end(profileJson.dump());
+            }
+        } catch(std::exception& e) {
+            std::cerr << "Error in player profile: " << e.what() << std::endl;
+            if(!*aborted) {
+                res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
+            }
         }
-
-        int userID = r[0][0].as<int>();
-
-        pqxx::result allGames = txn.exec(pqxx::zview("SELECT game_id, result from user_to_table WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT $3"), pqxx::params(userID, 0, 20));
-        
-        std::string gamesList = "";
-        int numWon = 0, numLost = 0;
-
-        json profileJson;
-
-        profileJson["name"] = username;
-        profileJson["id"] = userID;
-
-        for(auto row : allGames) {
-            std::string sGameID = row[0].as<std::string>();
-
-            gamesList += sGameID;
-            gamesList.push_back(',');
-
-            if(row[1].as<std::string>() == "won") numWon++;
-            else if(row[1].as<std::string>() == "lost") numLost++;
-        }
-        gamesList.pop_back();
-
-
-        profileJson["games"] = json::array();
-        profileJson["total"] = allGames.size();
-        profileJson["won"] = numWon;
-        profileJson["lost"] = numLost;
-
-        std::cout << "Games: " << gamesList << '\n';
-
-        pqxx::result gamesResult = txn.exec(pqxx::zview("SELECT white_name, black_name, result, reason, created_at FROM game WHERE id in (" + gamesList + ")"));
-
-        json gameJson;
-        for(auto game : gamesResult) {
-            gameJson["white"] = game[0].as<std::string>();
-            gameJson["black"] = game[1].as<std::string>();
-            gameJson["result"] = game[2].as<std::string>();
-            gameJson["reason"] = game[3].as<std::string>();
-            gameJson["created"] = game[4].as<std::string>();
-
-            profileJson["games"].push_back(gameJson);
-        }
-
-        res->writeHeader("Content-Type", "json");
-        res->write(profileJson.dump());
     });
 }
 
@@ -927,7 +965,7 @@ std::string getLiveGameOfUser(int userID) {
 }
 
 
-void getGameHandler(uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
+void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
     auto liveGamesIT = liveGames.find(gameID);
         
     // if it is a live game
@@ -936,7 +974,8 @@ void getGameHandler(uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
 
         // if the requested player is already playing the game
         if(reqUserID != -1 && (gameMngr->whiteData_->id_ == reqUserID || gameMngr->blackData_->id_ == reqUserID)) {
-            res->write("You are already playing in this game. If you wanted to play in a new window, please close the previous session and try again.");
+            if(!*aborted)
+                res->writeHeader("Content-Type", "text/plain")->end("You are already playing in this game. If you wanted to play in a new window, please close the previous session and try again.");
             return;
         }
 
@@ -944,11 +983,12 @@ void getGameHandler(uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
         liveJson["live"] = true;
         liveJson["socket"] = "watch?topic=" + std::to_string(gameID);
 
-        res->write(liveJson.dump());
+        if(!*aborted)
+            res->writeHeader("Content-Type", "application/json")->end(liveJson.dump());
     }
     // not a live game
     else {
-        tPool.submit([res, gameID]() {
+        tPool.submit([res, gameID, aborted]() {
             auto connHandle = cPool.acquire();
             pqxx::work txn{*connHandle->get()};
 
@@ -956,7 +996,8 @@ void getGameHandler(uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
                 pqxx::result gameResult = txn.exec(pqxx::zview("SELECT white_name, black_name, move_history, result, reason, created_at FROM game WHERE id = $1"), pqxx::params(gameID));
 
                 if(gameResult.size() == 0) {
-                    res->write("Invalid game id");
+                    if(!*aborted)
+                        res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Requested game doesn't exist.");
                     return;
                 }
 
@@ -970,12 +1011,13 @@ void getGameHandler(uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
                 gameJson["reason"] = gameResult[0][4].as<std::string>();
                 gameJson["created_at"] = gameResult[0][5].as<std::string>();
 
-                res->writeHeader("Content-Type", "json");
-                res->write(gameJson.dump());
+                if(!*aborted)
+                    res->writeHeader("Content-Type", "application/json")->end(gameJson.dump());
             }
             catch (std::exception& e) {
                 std::cout << "DB Error in fetching game: " << e.what() << '\n';
-                res->writeStatus("500 Internal Server Error")->write("Something went wrong. Please try again later.");
+                if(!*aborted)
+                    res->writeHeader("Content-Type", "text/plain")->writeStatus("500 Internal Server Error")->end("Something went wrong. Please try again later.");
             }
         });
     }
@@ -997,7 +1039,7 @@ void watchWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req
         auto it = liveGames.find(stoi(topic));
 
         if(it == liveGames.end()) {
-            res->write("Invalid topic received");
+            res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("No such game to receive updates");
             return;
         }
         else gamePointer = it->second;

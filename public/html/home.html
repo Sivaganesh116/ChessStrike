@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Strike</title>
+    <link rel="stylesheet" href="/css/home.css">
+</head>
+<body>
+
+    <header>
+        <nav>
+            <a href="/" class="logo">Chess Strike ♟️</a>
+            <div class="nav-right">
+                <div id="auth-links">
+                    <a class="nav-button" id="loginBtn">Login</a>
+                    <a class="nav-button signup" id="signupBtn">Sign Up</a>
+                </div>
+                <div id="profile-section" class="hidden">
+                    <img src="" alt="Profile" id="profile-icon">
+                    <div id="profile-dropdown" class="hidden">
+                        <a id="view-profile-link" href="#">View Profile</a>
+                        <a href="#" id="logout-button">Logout</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+    </header>
+
+    <main class="container">
+        <div class="left-column">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Live Games</h2>
+                    <div class="controls">
+                        <button id="refresh-live-games" title="Refresh">🔄</button>
+                        <button id="load-more-live-games" title="Load More">+</button>
+                    </div>
+                </div>
+                <div id="live-games-list" class="card-content">
+                    <p>Loading live games...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="right-column">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Play</h2>
+                </div>
+                <div class="card-content">
+                    <a href="/game/new" id="play-button" class="button-primary">
+                        Play Random Game (5 min)
+                    </a>
+                </div>
+            </div>
+
+            <div id="game-history-section" class="card hidden">
+                <div class="card-header">
+                    <h2>Game History</h2>
+                </div>
+                <div class="card-content">
+                    <div class="history-grid header">
+                        <div class="game-col">Game</div>
+                        <div class="result-col">Result</div>
+                        <div class="date-col">Date</div>
+                    </div>
+                    <div id="game-history-list">
+                        </div>
+                    <a href="#" id="show-more-history" class="show-more">Show more...</a>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/js/home.js"></script>
+</body>
+</html>

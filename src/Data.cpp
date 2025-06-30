@@ -48,6 +48,8 @@ MoveTimer::MoveTimer(int timeInSeconds, uv_loop_t* loop, void* extData) {
         return;
     }
 
+    std::cout << "Move Timer fd: " << fd_ << std::endl;
+
     loop_ = loop;
     extData_ = extData;
 
@@ -66,6 +68,7 @@ MoveTimer::MoveTimer(MoveTimer&& other) {
 }
 
 MoveTimer::~MoveTimer() {
+    std::cout << "Destructor MoveTimer\n";
     closeTimer();
 }
 
@@ -145,6 +148,7 @@ uv_poll_t* MoveTimer::getPoll() const {
 }
 
 void MoveTimer::pollTimer() const {
+    std::cout << "poll fd : " << fd_ << std::endl;
     poll_->data = extData_;
 
     if((uv_poll_init(loop_, poll_, fd_)) < 0) {
@@ -175,7 +179,7 @@ void MoveTimer::closeTimer() {
 PlayerData::PlayerData() {
     name_ = "";
     id_ = -1;
-    isWhite_ = offeredDraw_ = false;
+    isWhite_ = offeredDraw_ = isMyTurn_ = false;
     ws_ = otherWS_ = nullptr;
     moveTimer_ = nullptr;
     chess_ = nullptr;
@@ -183,15 +187,13 @@ PlayerData::PlayerData() {
     inGame_ = false;
     askedRematch_ = false;
     abandonTimer_ = us_create_timer((us_loop_t*) uWS::Loop::get(), 1, sizeof(PlayerData*));
-
-    PlayerData* thisData = this;
-    memcpy(us_timer_ext(abandonTimer_), &thisData, sizeof(thisData));
 }
 
 PlayerData::PlayerData(PlayerData&& other) {
     name_ = other.name_;
     id_ = other.id_;
     isWhite_ = other.isWhite_;
+    isMyTurn_ = other.isMyTurn_;
     offeredDraw_ = other.offeredDraw_;
     ws_ = other.ws_;
     otherWS_ = other.otherWS_;
@@ -211,16 +213,20 @@ PlayerData::PlayerData(PlayerData&& other) {
     other.name_ = "";
     other.inGame_ = false;
     other.askedRematch_ = false;
+    other.isMyTurn_ = false;
 }
 
 void PlayerData::startAbandonTimer() {
+    PlayerData* thisData = this;
+    memcpy(us_timer_ext(abandonTimer_), &thisData, sizeof(thisData));
+
     us_timer_set(abandonTimer_, [](us_timer_t* timer){
         PlayerData * abandonedPlayer;
 
         memcpy(&abandonedPlayer, us_timer_ext(timer), sizeof(abandonedPlayer));
 
         if(abandonedPlayer->id_ == -1) abandonedPlayer->gameManager_->randGameResultHandler(false, !abandonedPlayer->isWhite_, "Abandonment");
-        else abandonedPlayer->gameManager_->gameResultHandler(false, !abandonedPlayer->isWhite_, "Abandonment", "a");
+        else abandonedPlayer->gameManager_->gameResultHandler(false, !abandonedPlayer->isWhite_, "Abandonment", "A");
 
     }, 30000, 30000);
 }
@@ -235,56 +241,26 @@ GameManager::GameManager(int id, PlayerData* whiteData, PlayerData* blackData) :
 }
 
 void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view reason, std::string dbReason) {
-    json resultJson;
-    resultJson["type"] = "result";
-    resultJson["reason"] = reason;
+    std::string result;
 
     if(isDraw) {
         whiteScore_ += 0.5;
         blackScore_ += 0.5;
-
-        resultJson["w_score"] = whiteScore_;
-        resultJson["b_score"] = blackScore_;
-
-        resultJson["result"] = "draw";
-        whiteData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        blackData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-
-        whiteData_->ws_->publish(whiteData_->gameManager_->sGameID_, resultJson.dump(), uWS::OpCode::TEXT);
-
-        return;
+        result = "d";
     }
-    
-    resultJson["result"] = "win";
-
-    if(whiteWon) {
+    else if(whiteWon) {
         whiteScore_ += 1;
-
-        resultJson["w_score"] = whiteScore_;
-        resultJson["b_score"] = blackScore_;
-
-        whiteData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        resultJson["result"] = "lose";
-        blackData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-
-        resultJson["result"] = "white";
-
-        whiteData_->ws_->publish(whiteData_->gameManager_->sGameID_, resultJson.dump(), uWS::OpCode::TEXT);
+        result = "w";
     }
     else {
         blackScore_ += 1;
-
-        resultJson["w_score"] = whiteScore_;
-        resultJson["b_score"] = blackScore_;
-
-        blackData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        resultJson["result"] = "lose";
-        whiteData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-
-        resultJson["result"] = "white";
-
-        whiteData_->ws_->publish(whiteData_->gameManager_->sGameID_, resultJson.dump(), uWS::OpCode::TEXT);
+        result = "b";
     }
+
+    std::string toSend = "result " + result + " " + reason.data() + " " + std::to_string(whiteScore_) + " " + std::to_string(blackScore_);
+
+    if(whiteData_->ws_) whiteData_->ws_->send(toSend, uWS::OpCode::TEXT);
+    if(blackData_->ws_) blackData_->ws_->send(toSend, uWS::OpCode::TEXT);
 
     std::string moveHistory = whiteData_->chess_->getMoveHistory();
 
@@ -296,29 +272,26 @@ void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view
 void GameManager::randGameResultHandler(bool isDraw, bool whiteWon, std::string reason) {
     resetData();
 
-    json resultJson;
-    resultJson["type"] = "result";
-    resultJson["reason"] = reason;
+    std::string result;
 
     if(isDraw) {
-        resultJson["result"] = "draw";
-        whiteData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        blackData_->otherWS_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        return;
+        whiteScore_ += 0.5;
+        blackScore_ += 0.5;
+        result = "d";
     }
-
-    if(whiteWon) {
-        resultJson["result"] = "win";
-        whiteData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        resultJson["result"] = "lose";
-        blackData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
+    else if(whiteWon) {
+        whiteScore_ += 1;
+        result = "w";
     }
     else {
-        resultJson["result"] = "win";
-        blackData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
-        resultJson["result"] = "lose";
-        whiteData_->ws_->send(resultJson.dump(), uWS::OpCode::TEXT);
+        blackScore_ += 1;
+        result = "b";
     }
+
+    std::string toSend = "result " + result + " " + reason.data() + " " + std::to_string(whiteScore_) + " " + std::to_string(blackScore_);
+
+    if(whiteData_) whiteData_->ws_->send(toSend, uWS::OpCode::TEXT);
+    if(blackData_) blackData_->ws_->send(toSend, uWS::OpCode::TEXT);
 }
 
 void GameManager::createSyncTimer() {
@@ -374,7 +347,7 @@ void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool wh
 
         try {
             pqxx::result txnResult = txn.exec(
-                pqxx::zview("UPDATE game SET move_history = $1, reason = $2, result = $3 WHERE game_id = $4;"),
+                pqxx::zview("UPDATE game SET move_history = $1, reason = $2, result = $3 WHERE id = $4;"),
                 pqxx::params(moveHistory, dbReason, gameResult, gameID_)
             );
 

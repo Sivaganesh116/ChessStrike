@@ -278,7 +278,7 @@ void initRoutes(uWS::SSLApp & app) {
             numGames = stoi(sCount);
         }
 
-        getLiveGamesHandler(aborted, res, 10);
+        getLiveGamesHandler(aborted, res, numGames);
     });
 
 

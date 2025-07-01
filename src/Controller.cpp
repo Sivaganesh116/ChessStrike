@@ -112,6 +112,7 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
     if(random_number % 2) {
         if(waitingPlayer->name_ == "") waitingPlayer->name_ = "white";
         waitingPlayer->isWhite_ = true;
+        waitingPlayer->isMyTurn_ = true;
 
         if(newPlayerData->name_ == "") newPlayerData->name_ = "black";
         newPlayerData->isWhite_ = false;
@@ -122,6 +123,7 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
 
         if(newPlayerData->name_ == "") newPlayerData->name_ = "white";
         newPlayerData->isWhite_ = true;
+        newPlayerData->isMyTurn_ = true;
     }
 
     if(waitingPlayer->chess_) newPlayerData->chess_ = waitingPlayer->chess_;
@@ -136,7 +138,10 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
 
     waitingPlayer->inGame_ = newPlayerData->inGame_ = true;
 
-    tPool.submit([waitingPlayerRef, waitingPlayer, newPlayerData, randGame](){
+    // reset the waiting player
+    *waitingPlayerRef = nullptr;
+
+    tPool.submit([waitingPlayer, newPlayerData, randGame](){
         int gameID = -1;
 
         if(!randGame) {
@@ -159,7 +164,7 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
             txn.commit();
         }
 
-        waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(gameID, waitingPlayer, newPlayerData);
+        waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(gameID, waitingPlayer->isWhite_ ? waitingPlayer : newPlayerData, newPlayerData->isWhite_ ? waitingPlayer : newPlayerData);
 
         std::stringstream toNewPlayer;
         toNewPlayer << "start-game" << " " << newPlayerData->gameManager_->sGameID_ << " " << (newPlayerData->isWhite_ ? "w" : "b") << " " << waitingPlayer->name_ << " " << "300"; 
@@ -174,9 +179,6 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
         playersInGame.insert({newPlayerData->id_, newPlayerData->gameManager_.get()});
 
         liveGames.insert({gameID, waitingPlayer->gameManager_.get()});
-
-        // reset the waiting player
-        *waitingPlayerRef = nullptr;
 
         if(waitingPlayer->isWhite_) {
             waitingPlayer->moveTimer_->start();
@@ -270,6 +272,7 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
 
     if(id == -1) {
         std::cout << "Not Authorized to create web socket connection.\n";
+        return;
     }
 
 
@@ -326,7 +329,15 @@ void gameMoveHandler(uWS::WebSocket<true, true, PlayerData>* ws, PlayerData* mov
         ws->send("move false ", uWS::OpCode::TEXT);
         return;
     }
-    movedPlayerData->otherWS_->send("newmove " + move, uWS::OpCode::TEXT);
+
+    movedPlayerData->moveTimer_->stop();
+    auto* otherData = (movedPlayerData->gameManager_->whiteData_ == movedPlayerData ? movedPlayerData->gameManager_->blackData_ : movedPlayerData->gameManager_->whiteData_);
+    otherData->moveTimer_->start();
+
+    movedPlayerData->isMyTurn_ = false;
+    otherData->isMyTurn_ = true;
+
+    if(otherData->ws_) otherData->ws_->send("newmove " + move, uWS::OpCode::TEXT);
 
     ws->send("move true", uWS::OpCode::TEXT);
     ws->publish(movedPlayerData->gameManager_->sGameID_, "move " + move, uWS::OpCode::TEXT);
@@ -383,11 +394,13 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 
     if(random_number % 2) {
         p1->isWhite_ = true;
+        p1->isMyTurn_ = true;
         p2->isWhite_ = false;
     }
     else {
         p1->isWhite_ = false;
         p2->isWhite_ = true;
+        p2->isMyTurn_ = true;
     }
 
     tPool.submit([p1, p2](){
@@ -406,33 +419,30 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 
         txn.commit();
 
-        json toP1;
-        toP1["type"] = "start-game";
-        toP1["white"] = p1->isWhite_;
+        p1->gameManager_->gameID_ = txnResult[0][0].as<int>();
+        p1->gameManager_->sGameID_ = std::to_string(p1->gameManager_->gameID_);
 
-        json toP2;
-        toP2["type"] = "start-game";
-        toP2["white"] = p2->isWhite_;
+        std::stringstream toP1;
+        toP1 << "start-rematch" << " " << p1->gameManager_->sGameID_ << " " << (p1->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
+
+        std::stringstream toP2;
+        toP2 << "start-rematch" << " " << p1->gameManager_->sGameID_ << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
 
         std::cout << "player's re-matched" << std::endl;
 
-        p1->ws_->send(toP1.dump(), uWS::OpCode::TEXT);
-        p2->ws_->send(toP2.dump(), uWS::OpCode::TEXT);
+        p1->ws_->send(toP1.str(), uWS::OpCode::TEXT);
+        p2->ws_->send(toP2.str(), uWS::OpCode::TEXT);
 
 
         // It is assumed that all the relvant data of both players and game is reset
 
         // publish rematch to subscribers/watchers
-        json rematchJson;
-        rematchJson["type"] = "rematch";
-        rematchJson["id"] = txnResult[0][0].as<int>();
-        rematchJson["white"] = p1->isWhite_ ? p1->id_ : p2->id_;
-        rematchJson["black"] = p1->isWhite_ ? p2->id_ : p1->id_;
 
-        p1->ws_->publish(p1->gameManager_->sGameID_, rematchJson.dump(), uWS::OpCode::TEXT);
-
-        p1->gameManager_->gameID_ = txnResult[0][0].as<int>();
-        p1->gameManager_->sGameID_ = std::to_string(p1->gameManager_->gameID_);
+        std::stringstream toSubs;
+        toP2 << "start-rematch" << " " << p1->gameManager_->sGameID_ << " " << p1->name_ << " " << (p1->isWhite_ ? "w" : "b") << " " << p2->name_ << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
+        
+        // To-do : change topic to player'ids
+        p1->ws_->publish(p1->gameManager_->sGameID_, toSubs.str(), uWS::OpCode::TEXT);
 
         if(p1->isWhite_) {
             p1->gameManager_->whiteData_ = p1;
@@ -449,6 +459,8 @@ void rematch(PlayerData* p1, PlayerData* p2) {
         playersInGame.insert({p2->id_, p2->gameManager_.get()});
 
         liveGames.insert({txnResult[0][0].as<int>(), p1->gameManager_.get()});
+
+        p1->gameManager_->startSyncTimer();
     });
 }
 
@@ -471,27 +483,36 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         gameMoveHandler(ws, movedPlayerData, move);
     }
     else if(msgType == "chat") {
-        if(!movedPlayerData->otherWS_ || movedPlayerData->otherWS_->getUserData()->inGame_) return;
+        if(!movedPlayerData->otherWS_) return;
 
-        ws->getUserData()->otherWS_->send(msg);
+        movedPlayerData->otherWS_->send(msg, uWS::OpCode::TEXT);
     }
-    else if(msgType == "draw") {
+    else if(msgType == "req-draw") {
         if(!movedPlayerData->inGame_) return;
 
         movedPlayerData->offeredDraw_ = !movedPlayerData->offeredDraw_;
-        ws->getUserData()->otherWS_->send(msg);
+        if(movedPlayerData->otherWS_) movedPlayerData->otherWS_->send("draw", uWS::OpCode::TEXT);
     }
-    else if(msgType == "result") {
+    else if(msgType == "res-draw") {
+        auto * otherData = (movedPlayerData->gameManager_->whiteData_ == movedPlayerData ? movedPlayerData->gameManager_->blackData_ : movedPlayerData->gameManager_->whiteData_);
+        if(!otherData->offeredDraw_) {
+            std::cout << "Fishy user accepted draw when other player didn't offer one\n";
+            return;
+        }
+
+        std::string drawResponse;
+        ss >> drawResponse;
+
+        if(drawResponse == "a") movedPlayerData->gameManager_->gameResultHandler(true, false, "Agreement", "a");
+        else if(otherData->ws_) {
+            otherData->ws_->send("dr", uWS::OpCode::TEXT);
+            otherData->offeredDraw_ = false;
+        }
+    }
+    else if(msgType == "resign") {
         if(!movedPlayerData->inGame_) return;
 
-        std::string result;
-        ss >> result;
-
-        // To-Do: does the order of player data not matter?
-        if(result == "d") {
-            if(movedPlayerData->otherWS_->getUserData()->offeredDraw_) movedPlayerData->gameManager_->gameResultHandler(true, false, "Agreement", "a");
-        }
-        else movedPlayerData->gameManager_->gameResultHandler(false, movedPlayerData->isWhite_ == false, "Resignation", "R");
+        movedPlayerData->gameManager_->gameResultHandler(false, movedPlayerData->isWhite_ == false, "Resignation", "R");
     }
     // "req-" and "res-" comes to server from users
     else if(msgType == "req-rematch") {
@@ -505,12 +526,12 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
 
         // if other player is already in a game
         if(movedPlayerData->otherWS_->getUserData()->inGame_) {
-            ws->send("rg", uWS::OpCode::TEXT);
+            ws->send("rn", uWS::OpCode::TEXT);
             return;
         }
 
         movedPlayerData->askedRematch_ = true;
-        movedPlayerData->otherWS_->send("rematch");
+        movedPlayerData->otherWS_->send("rematch", uWS::OpCode::TEXT);
     }
     else if(msgType == "res-rematch") {
         if(movedPlayerData->inGame_) return;
@@ -530,7 +551,7 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
             movedPlayerData->askedRematch_ = false;
         }
         else {
-            movedPlayerData->otherWS_->send("rr");
+            movedPlayerData->otherWS_->send("rr", uWS::OpCode::TEXT);
         }
 
         // reset rematch status
@@ -540,6 +561,9 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         if(movedPlayerData->inGame_) return;
 
         movedPlayerData->inGame_ = true;
+        
+        // player is starting a new game, sever the connection with the previous player
+        if(movedPlayerData->otherWS_) movedPlayerData->otherWS_->getUserData()->otherWS_ = nullptr;
 
         if(regWaitingPlayer) matchPlayer(movedPlayerData, false);
         else regWaitingPlayer = movedPlayerData;
@@ -552,13 +576,23 @@ void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerData> * ws) {
 
     // if a reconnection is happening
     if(newData->inGame_) {
-        if(newData->otherWS_) {
-            newData->otherWS_->getUserData()->ws_ = ws;
-        }
         newData->ws_ = ws;
 
+        // change the player data pointer in game manager, as it would be pointing to a dangling after std::move
+        if(newData->isWhite_) {
+            newData->gameManager_->whiteData_ = newData;
+            newData->gameManager_->blackData_->otherWS_ = ws;
+        }
+        else {
+            newData->gameManager_->blackData_ = newData;
+            newData->gameManager_->whiteData_->otherWS_ = ws;
+        }
+
+        auto [wsec, wnsec] = newData->gameManager_->whiteData_->moveTimer_->getRemainingTime();
+        auto [bsec, bnsec] = newData->gameManager_->blackData_->moveTimer_->getRemainingTime(); 
+
         std::stringstream reconnectData;
-        reconnectData << "reconnection" << " " << (newData->isWhite_ ? "w" : "b") << " " << (newData->isWhite_ ? newData->gameManager_->blackData_->name_ : newData->gameManager_->whiteData_->name_) << " " << "300" << " " << "300" << " " << (newData->isMyTurn_ ? (newData->isWhite_ ? "w" : "b") : (newData->isWhite_ ? "b" : "w")) << " " << newData->chess_->getMoveHistory();
+        reconnectData << "reconnection" << " " << newData->gameManager_->sGameID_ << " " << (newData->isWhite_ ? "w" : "b") << " " << (newData->isWhite_ ? newData->gameManager_->blackData_->name_ : newData->gameManager_->whiteData_->name_) << " " << std::to_string(wsec) << " " << std::to_string(bsec) << " " << (newData->isMyTurn_ ? (newData->isWhite_ ? "w" : "b") : (newData->isWhite_ ? "b" : "w")) << " " << newData->chess_->getMoveHistory();
         ws->send(reconnectData.str(), uWS::OpCode::TEXT);
         
         return;
@@ -626,13 +660,13 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
     else if(msgType == "chat") {
         if(!movedPlayerData->otherWS_ || movedPlayerData->otherWS_->getUserData()->inGame_) return;
 
-        ws->getUserData()->otherWS_->send(msg);
+        ws->getUserData()->otherWS_->send(msg, uWS::OpCode::TEXT);
     }
     else if(msgType == "req-draw") {
         if(!movedPlayerData->inGame_) return;
 
         movedPlayerData->offeredDraw_ = true;
-        ws->getUserData()->otherWS_->send(msg);
+        ws->getUserData()->otherWS_->send(msg, uWS::OpCode::TEXT);
     }
     else if(msgType == "res-draw") {
         std::string res;
@@ -641,7 +675,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
         if(res == "a") movedPlayerData->gameManager_->randGameResultHandler(true, false, "Agreement");
         else {
             movedPlayerData->otherWS_->getUserData()->offeredDraw_ = false;
-            movedPlayerData->otherWS_->send("dr"); // draw reject
+            movedPlayerData->otherWS_->send("dr", uWS::OpCode::TEXT); // draw reject
         }
     }
     else if(msgType == "resign") {
@@ -661,7 +695,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
 
 
         movedPlayerData->askedRematch_ = true;
-        movedPlayerData->otherWS_->send("rematch");
+        movedPlayerData->otherWS_->send("rematch", uWS::OpCode::TEXT);
     }
     else if(msgType == "res-rematch") {
         if(movedPlayerData->inGame_) return;
@@ -681,7 +715,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
             movedPlayerData->askedRematch_ = false;
         }
         else {
-            movedPlayerData->otherWS_->send("rr"); // rematch reject
+            movedPlayerData->otherWS_->send("rr", uWS::OpCode::TEXT); // rematch reject
         }
 
         // reset rematch status
@@ -698,15 +732,20 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
 }
 
 void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, std::string_view msg) {
-    if(!ws->getUserData()->inGame_) return;
+    if(!(ws->getUserData()->inGame_)) return;
 
     // store the player data
     PlayerData* playerData = new PlayerData(std::move(*ws->getUserData()));
     playerData->ws_ = nullptr;
     
-    if(playerData->isWhite_) playerData->gameManager_->blackData_->otherWS_ = nullptr;
-    else playerData->gameManager_->whiteData_->otherWS_ = nullptr;
-
+    if(playerData->isWhite_) {
+        playerData->gameManager_->whiteData_ = playerData;
+        playerData->gameManager_->blackData_->otherWS_ = nullptr;
+    }
+    else {
+        playerData->gameManager_->blackData_ = playerData;
+        playerData->gameManager_->whiteData_->otherWS_ = nullptr;
+    }
 
     closedConnections.insert({playerData->id_, playerData});
 
@@ -783,7 +822,7 @@ void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>*
 
             if(!*aborted) {
                 // add Secure in cookie when https is implemented
-                res->writeHeader("Set-Cookie", "token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Expires=Wed, 01 Jul 2025 00:00:00 GMT");
+                res->writeHeader("Set-Cookie", "token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Expires=Wed, 10 Jul 2025 00:00:00 GMT");
                 res->writeHeader("Content-Type", "application/json");
                 json j;
                 j["username"] = username;

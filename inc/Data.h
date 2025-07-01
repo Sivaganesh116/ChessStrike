@@ -40,7 +40,7 @@ struct MoveTimer {
     int initSeconds_;
 
     MoveTimer(int timeInSeconds, uv_loop_t* loop, void* extData);
-    MoveTimer(MoveTimer&& other);
+    // MoveTimer(MoveTimer&& other);
     ~MoveTimer();
 
     int getFD();
@@ -49,6 +49,10 @@ struct MoveTimer {
     void stop();
     void reset();
     uv_poll_t* getPoll() const;
+    
+    inline void setExtData(void* extData) {
+        poll_->data = extData;
+    }
 
 private:
     void pollTimer() const;
@@ -80,6 +84,8 @@ public:
 
     void gameResultHandler(bool isDraw, bool whiteWon, std::string_view reason, std::string dbReason);
     void randGameResultHandler(bool isDraw, bool whiteWon, std::string reason);
+    void startSyncTimer();
+    void stopSyncTimer();
 
     int gameID_;
     std::string sGameID_;

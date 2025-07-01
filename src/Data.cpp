@@ -56,16 +56,21 @@ MoveTimer::MoveTimer(int timeInSeconds, uv_loop_t* loop, void* extData) {
     pollTimer();
 }
 
-MoveTimer::MoveTimer(MoveTimer&& other) {
-    poll_ = other.poll_;
-    fd_ = other.fd_;
-    timeRemainingNanoSeconds_ = other.timeRemainingNanoSeconds_;
-    timeRemainingSeconds_ = other.timeRemainingSeconds_;
+// MoveTimer::MoveTimer(MoveTimer&& other) {
+//     poll_ = other.poll_;
+//     fd_ = other.fd_;
+//     loop_ = other.loop_;
+//     timeRemainingNanoSeconds_ = other.timeRemainingNanoSeconds_;
+//     timeRemainingSeconds_ = other.timeRemainingSeconds_;
+//     initSeconds_ = other.initSeconds_;
 
-    other.poll_ = nullptr;
-    other.fd_ = -1;
-    other.timeRemainingNanoSeconds_ = other.timeRemainingSeconds_ = 0;
-}
+//     other.poll_ = nullptr;
+//     other.fd_ = -1;
+//     other.loop_ = nullptr;
+//     other.timeRemainingNanoSeconds_ = other.timeRemainingSeconds_ = 0;
+//     other.extData_ = nullptr;
+//     other.initSeconds_ = 0;
+// }
 
 MoveTimer::~MoveTimer() {
     std::cout << "Destructor MoveTimer\n";
@@ -162,6 +167,8 @@ void MoveTimer::pollTimer() const {
 }
 
 void MoveTimer::closeTimer() {
+    if(fd_ == -1) return;
+
     if(uv_poll_stop(poll_) < 0) {
         perror("Couldn't stop timer poll");
         return;
@@ -189,7 +196,7 @@ PlayerData::PlayerData() {
     abandonTimer_ = us_create_timer((us_loop_t*) uWS::Loop::get(), 1, sizeof(PlayerData*));
 }
 
-PlayerData::PlayerData(PlayerData&& other) {
+PlayerData::PlayerData(PlayerData&& other) : moveTimer_(std::move(other.moveTimer_)) {
     name_ = other.name_;
     id_ = other.id_;
     isWhite_ = other.isWhite_;
@@ -197,15 +204,16 @@ PlayerData::PlayerData(PlayerData&& other) {
     offeredDraw_ = other.offeredDraw_;
     ws_ = other.ws_;
     otherWS_ = other.otherWS_;
-    moveTimer_ = std::move(other.moveTimer_);
+
+    // set the ext data so that poll's callback won't point to player data that is about to be freed
+    if(moveTimer_) moveTimer_->setExtData(this);
+
     abandonTimer_ = other.abandonTimer_;
     chess_ = other.chess_;
     gameManager_ = other.gameManager_;
     inGame_ = other.inGame_;
     askedRematch_ = other.askedRematch_;
 
-    other.gameManager_.reset();
-    other.chess_.reset();
     other.abandonTimer_ = nullptr;
     other.otherWS_ = nullptr;
     other.ws_ = nullptr;
@@ -263,6 +271,7 @@ void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view
     if(blackData_->ws_) blackData_->ws_->send(toSend, uWS::OpCode::TEXT);
 
     std::string moveHistory = whiteData_->chess_->getMoveHistory();
+    std::cout << "db reason: " << dbReason << "moves: " << moveHistory << std::endl;
 
     resetData();
 
@@ -298,8 +307,14 @@ void GameManager::createSyncTimer() {
     syncTimer_ = us_create_timer((us_loop_t*)uWS::Loop::get(), 1, sizeof(GameManager*));
     GameManager* thisData = this;
     memcpy(us_timer_ext(syncTimer_), &thisData, sizeof(thisData));
-    
+}
 
+void GameManager::destroySyncTimer() {
+    us_timer_close(syncTimer_);
+    syncTimer_ = nullptr;
+}
+
+void GameManager::startSyncTimer() {
     us_timer_set(syncTimer_, [](us_timer_t* timer){
         GameManager * gameManager;
 
@@ -320,12 +335,13 @@ void GameManager::createSyncTimer() {
     }, 1000, 1000);
 }
 
-void GameManager::destroySyncTimer() {
-    us_timer_close(syncTimer_);
-    syncTimer_ = nullptr;
+void GameManager::stopSyncTimer() {
+    us_timer_set(syncTimer_, [](us_timer_t* timer){}, 0, 0);
 }
 
 void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool whiteWon, std::string moveHistory) {
+    std::cout << "DB Handler: " << dbReason << " " << moveHistory << std::endl;
+
     std::string gameResult, whiteResult, blackResult;
 
     if(isDraw) {
@@ -371,7 +387,7 @@ void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool wh
 }
 
 void GameManager::resetData() {
-    destroySyncTimer();
+    stopSyncTimer();
     whiteData_->moveTimer_->reset();
     blackData_->moveTimer_->reset();
     whiteData_->stopAbandonTimer();

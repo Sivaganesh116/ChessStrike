@@ -13,7 +13,7 @@
     let promotionSquare = null;
 
     // History for move navigation, stores FEN strings
-    let moveHistory = ['rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1']; // Start with initial FEN
+    let moveHistory = ['start']; // Start with initial FEN
     let currentMoveIndex = 0; // Index for the moveHistory array
 
     // Timers
@@ -25,7 +25,7 @@
     const movesTbody = document.getElementById('moves-tbody');
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
-    const drawOfferModal = document.getElementById('draw-offer-modal');
+    let drawOfferModal = document.getElementById('draw-offer-modal');
     const rematchOfferModal = document.getElementById('rematch-offer-modal');
     const gameOverModal = document.getElementById('game-over-modal');
 
@@ -83,18 +83,20 @@
 
                 if(isGameOver) {
                     resetGameActions(rightPanel);
+                    clearMoveHistory();
+                    board.position('start', false);
+                    moveHistory = ['start'];
                 }
-
-                isGameOver = false;
-
-                moveHistory = ['start'];
-
-                hideOverlay();
-                board.draggable = true;
 
                 board.orientation(playerColor === 'w' ? 'white' : 'black');
                 updateTimersDisplay();
                 startWhiteTimer();
+
+                isGameOver = false;
+                hideOverlay();
+                board.draggable = true;
+
+                addChatMessage("System", `${myName} vs ${opponentName}`);
                 addChatMessage("System", `Game started. You are ${playerColor === 'w' ? 'White' : 'Black'}.`);
                 break;
 
@@ -106,6 +108,8 @@
 
                 playerColor = parts[2];
                 opponentName = parts[3];
+                document.getElementById('opponent-name').innerText = opponentName;
+
                 whiteTime = parseInt(parts[4], 10);
                 blackTime = parseInt(parts[5], 10);
                 currentTurn = parts[6];
@@ -115,15 +119,43 @@
                     updateMoveHistory(parts[i], i%2 ? "w" : "b", board.fen());
                 }
 
-                hideOverlay();
-                board.draggable = true;
+                board.position(board.position(), false);
 
                 board.orientation(playerColor === 'w' ? 'white' : 'black');
 
-                if(playerColor === currentTurn) {
-                    if(playerColor === "w") startWhiteTimer();
-                    else startBlackTimer();
-                }
+                updateTimersDisplay();
+                handleTurnTimer();
+
+                hideOverlay();
+                board.draggable = true;
+
+                addChatMessage("System", `${myName} vs ${opponentName}`);
+                break;
+
+            case 'start-rematch':
+                gameID = parts[1];
+                // Change URL from /game to /game/:id without reload
+                history.replaceState({ gameID }, '', `/game/${gameID}`);
+                currentTurn = "w";
+                playerColor = parts[2];
+                whiteTime = parts[3];
+                blackTime = parts[4];
+
+                resetGameActions(rightPanel);
+                clearMoveHistory();
+                board.position('start', false);
+                moveHistory = ['start'];
+
+                board.orientation(playerColor === 'w' ? 'white' : 'black');
+                moveHistory = ['start'];
+
+                updateTimersDisplay();
+                startWhiteTimer();
+                isGameOver = false;
+
+                board.draggable = true;
+
+                addChatMessage("System", `${myName} vs ${opponentName}`);
 
             case 'move': // Response to our move attempt
                 if (parts[1] === 'false') {
@@ -200,15 +232,16 @@
 
             // Other cases remain the same
             case 'draw':
+                if(!drawOfferModal) drawOfferModal = document.getElementById('draw-offer-modal');
                 drawOfferModal.classList.remove('hidden');
                 break;
             case 'rematch':
+                if(!rematchOfferModal) rematchOfferModal = document.getElementById('rematch-offer-modal');
                 rematchOfferModal.classList.remove('hidden');
                 break;
             case 'chat':
-                const sender = parts[1];
-                const chatMsg = parts.slice(2).join(' ');
-                addChatMessage(sender, chatMsg);
+                const chatMsg = parts.slice(1).join(' ');
+                addChatMessage(opponentName, chatMsg);
                 break;
             case 'time':
                 updateTimersFromServer(parts[1], parts[2]);
@@ -337,6 +370,15 @@
         movesTbody.parentElement.scrollTop = movesTbody.parentElement.scrollHeight;
         updateNavButtons();
     }
+
+    
+    function clearMoveHistory() {
+        const movesTbody = document.getElementById('moves-tbody');
+        if (movesTbody) {
+            movesTbody.innerHTML = ''; // This clears all rows
+        }
+    }
+
 
     function updateNavButtons() {
         prevBtn.disabled = currentMoveIndex <= 0;
@@ -576,6 +618,7 @@
 
             if(data.loggedIn === true) {
                 document.getElementById("player-name").innerText = data.username;
+                myName = data.username;
             }  
             else {
                 console.log("User is not logged in");
@@ -697,7 +740,6 @@
         board = Chessboard('board', config);        
 
         showOverlay('');
-        board.draggable = false;
 
         getUserStatus();
         initWebSocket();

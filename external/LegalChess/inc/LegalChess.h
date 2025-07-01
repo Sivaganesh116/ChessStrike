@@ -65,7 +65,7 @@ public:
         else 
             m_pBoard->promote(move[4], sMove);
 
-        // printBoard();
+        m_pBoard->addMoveToHistory(move);
 
         return m_pBoard->getGameResult();
     }   

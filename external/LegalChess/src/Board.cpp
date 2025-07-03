@@ -104,6 +104,26 @@ void Board::move(const Move& move) {
     if((int)movingPiece % 6 == 0 || grid[move.toRow][move.toCol] != Piece::EMPTY) halfMovesCount = 0;
     else halfMovesCount++;
 
+    // if a rook is captured and the king can castle with it
+    if(isWhiteTurn) {
+        if(move.toRow == 7 && move.toCol == 0 && canBlackKingShortCastle) {
+            canBlackKingShortCastle = false;
+        }
+
+        if(move.toRow == 7 && move.toCol == 7 && canBlackKingLongCastle) {
+            canBlackKingLongCastle = false;
+        }
+    }
+    else {
+        if(move.toRow == 0 && move.toCol == 0 && canWhiteKingShortCastle) {
+            canWhiteKingShortCastle = false;
+        }
+
+        if(move.toRow == 0 && move.toCol == 7 && canWhiteKingLongCastle) {
+            canWhiteKingLongCastle = false;
+        }
+    }
+
     // update the move in grid
     grid[move.toRow][move.toCol] = movingPiece;
     grid[move.fromRow][move.fromCol] = Piece::EMPTY;

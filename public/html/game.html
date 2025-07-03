@@ -168,8 +168,8 @@
             <div class="lg:col-span-2">
                 <!-- Opponent's Timer and Info -->
                 <div class="flex justify-between items-center mb-4 p-3 bg-white rounded-lg shadow">
-                    <h2 id="opponent-name" class="text-xl font-bold">Opponent</h2>
-                    <div id="opponent-timer" class="timer">10:00</div>
+                    <h2 id="top-name" class="text-xl font-bold">Opponent</h2>
+                    <div id="top-timer" class="timer">0:00</div>
                 </div>
 
                 <!-- Chessboard -->
@@ -177,8 +177,8 @@
 
                 <!-- Player's Timer and Info -->
                 <div class="flex justify-between items-center mt-4 p-3 bg-white rounded-lg shadow">
-                    <h2 id="player-name" class="text-xl font-bold">You</h2>
-                    <div id="player-timer" class="timer">10:00</div>
+                    <h2 id="bottom-name" class="text-xl font-bold">You</h2>
+                    <div id="bottom-timer" class="timer">0:00</div>
                 </div>
             </div>
 
@@ -223,9 +223,6 @@
             <button id="close-game-over-btn" class="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">Close</button>
         </div>
     </div>
-
-    <!-- Matchign Overlay -->
-    <div id="overlay"> You are being matched with an opponent... </div>
 
     <!-- JQuery is a dependency for chessboard.js -->
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"

@@ -29,8 +29,16 @@ void initRoutes(uWS::SSLApp & app) {
     app.ws<GameManagerPointer>("/watch", {
         .upgrade = watchWSUpgradeHandler,
         .open = [](auto * ws) {
-            GameManager* gamePointer = ws->getUserData()->pointer;
-            ws->subscribe(std::to_string(gamePointer->gameID_));
+            GameManager* gameMngr = ws->getUserData()->pointer;
+            ws->subscribe(std::to_string(gameMngr->gameID_));
+
+            auto [wsec, wnsec] = gameMngr->whiteData_->moveTimer_->getRemainingTime();
+            auto [bsec, bnsec] = gameMngr->blackData_->moveTimer_->getRemainingTime();
+
+            std::stringstream gameInfo;
+            gameInfo << "info " << gameMngr->whiteData_->name_ << " " << gameMngr->blackData_->name_ << " " << std::to_string(wsec) << " " << std::to_string(bsec) << " " << gameMngr->blackData_->chess_->getMoveHistory() << " " << gameMngr->timeStamps_;
+            
+            ws->send(gameInfo.str(), uWS::OpCode::TEXT);
         }
     });
 
@@ -311,7 +319,7 @@ void initRoutes(uWS::SSLApp & app) {
             res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Invalid user id to get live game");
     });
 
-    app.get("/game-details/:id", [](auto * res, auto * req) {
+    app.get("/game-info/:id", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {

@@ -1,4 +1,3 @@
-
     let board = null;
     let socket = null;
 
@@ -11,10 +10,15 @@
     let opponentName = "";
     let lastMove = "";
     let promotionSquare = null;
+    let sentTime = null;
+    let RTT = null;
+    let enpassantSquare = null;
+    let isBottomWhite = true;
 
     // History for move navigation, stores FEN strings
     let moveHistory = ['start']; // Start with initial FEN
     let currentMoveIndex = 0; // Index for the moveHistory array
+    let timeStamps = [];
 
     // Timers
     let whiteTimerInterval, blackTimerInterval;
@@ -26,7 +30,7 @@
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
     let drawOfferModal = document.getElementById('draw-offer-modal');
-    const rematchOfferModal = document.getElementById('rematch-offer-modal');
+    let rematchOfferModal = document.getElementById('rematch-offer-modal');
     const gameOverModal = document.getElementById('game-over-modal');
 
     // --- WebSocket Logic ---
@@ -49,7 +53,6 @@
             } else {
                 console.log('[close] Connection died');
                 if(!isGameOver) showOverlay("Connection lost, please check your connection and refresh the page to continue playing");
-                board.draggable = false;
             }
 
             addChatMessage("System", "Connection lost.");
@@ -75,26 +78,27 @@
 
                 playerColor = parts[2];
                 opponentName = parts[3];
-                document.getElementById("opponent-name").innerText = opponentName;
+                document.getElementById("top-name").innerText = opponentName;
 
                 whiteTime = blackTime = parseInt(parts[4], 10);
+                timeStamps = [[whiteTime, blackTime]];
 
                 currentTurn = 'w'; // Game always starts with white's turn
 
                 if(isGameOver) {
-                    resetGameActions(rightPanel);
+                    replaceRematchOptionsWithDrawOptions();
                     clearMoveHistory();
                     board.position('start', false);
-                    moveHistory = ['start'];
+                    isGameOver = false;
                 }
+
+                if(playerColor === 'b') isBottomWhite = false;
 
                 board.orientation(playerColor === 'w' ? 'white' : 'black');
                 updateTimersDisplay();
                 startWhiteTimer();
 
-                isGameOver = false;
                 hideOverlay();
-                board.draggable = true;
 
                 addChatMessage("System", `${myName} vs ${opponentName}`);
                 addChatMessage("System", `Game started. You are ${playerColor === 'w' ? 'White' : 'Black'}.`);
@@ -108,18 +112,32 @@
 
                 playerColor = parts[2];
                 opponentName = parts[3];
-                document.getElementById('opponent-name').innerText = opponentName;
+                document.getElementById('top-name').innerText = opponentName;
 
                 whiteTime = parseInt(parts[4], 10);
                 blackTime = parseInt(parts[5], 10);
                 currentTurn = parts[6];
 
-                for(let i = 7; i<parts.length; i++) {
-                    board.move(`${parts[i].substring(0, 2)}-${parts[i].substring(2, 4)}`);
+                let isMove = true;
+
+                let i = 7;
+
+                while(i < parts.length) {
+                    if(parts[i] == "time") {
+                        i++;
+                        break;
+                    }
+
+                    makeMove(parts[i], false);
                     updateMoveHistory(parts[i], i%2 ? "w" : "b", board.fen());
+
+                    i++;
                 }
 
-                board.position(board.position(), false);
+                while(i < parts.length) {
+                    timeStamps.push([parseInt(parts[i].substring(0, parts[i].indexOf('-') + 1)), parseInt(parts[i].substring(parts[i].indexOf('-')+1, parts[i].length))]);
+                    i++;
+                }
 
                 board.orientation(playerColor === 'w' ? 'white' : 'black');
 
@@ -127,7 +145,6 @@
                 handleTurnTimer();
 
                 hideOverlay();
-                board.draggable = true;
 
                 addChatMessage("System", `${myName} vs ${opponentName}`);
                 break;
@@ -138,24 +155,22 @@
                 history.replaceState({ gameID }, '', `/game/${gameID}`);
                 currentTurn = "w";
                 playerColor = parts[2];
-                whiteTime = parts[3];
-                blackTime = parts[4];
+                whiteTime = parseInt(parts[3], 10);
+                blackTime = parseInt(parts[4], 10);
+                timeStamps = [whiteTime, blackTime];
 
-                resetGameActions(rightPanel);
+                replaceRematchOptionsWithDrawOptions();
                 clearMoveHistory();
                 board.position('start', false);
-                moveHistory = ['start'];
 
                 board.orientation(playerColor === 'w' ? 'white' : 'black');
-                moveHistory = ['start'];
 
                 updateTimersDisplay();
                 startWhiteTimer();
                 isGameOver = false;
 
-                board.draggable = true;
-
                 addChatMessage("System", `${myName} vs ${opponentName}`);
+                break;
 
             case 'move': // Response to our move attempt
                 if (parts[1] === 'false') {
@@ -164,62 +179,72 @@
                     break;
                 }
                 else {
-                    if(isCastle(lastMove, true)) {
-                        board.position(board.position(), false);
-                    }
-                    else if(lastMove.length == 5) {
-                        let position = board.position();
+                    // sync timers with server
+                    let receivedTime = performance.now();
 
-                        const newPiece = lastMove[4];
-                        let {from, to} = promotionSquare;
+                    RTT = receivedTime - sentTime;
 
-                        position[to] = newPiece;
-                        delete position[from];
+                    let wsec = parseInt(parts[2], 10);
+                    let wnsec = parseInt(parts[3], 10);
+                    let bsec = parseInt(parts[4], 10);
+                    let bnsec = parseInt(parts[5], 10);
 
-                        board.position(position, false);
+                    if(currentTurn == 'w') {
+                        let wTimeMs = wsec * 1000 + wnsec / 1e6;
+                        let bTimeMs = bsec * 1000 + bnsec / 1e6;
+
+                        wTimeMs -= RTT;
+                        
+                        wTimeMs = Math.ceil(wTimeMs/1000);
+                        bTimeMs = Math.ceil(bTimeMs/1000);
+
+                        updateTimersFromServer(wTimeMs, bTimeMs);
+                        timeStamps.push([wTimeMs, bTimeMs]);
                     }
                     else {
-                        board.move(`${lastMove.substring(0, 2)}-${lastMove.substring(2, 4)}`);
-                        board.position(board.position(), false);
+                        let wTimeMs = wsec * 1000 + wnsec / 1e6;
+                        let bTimeMs = bsec * 1000 + bnsec / 1e6;
+
+                        bTimeMs -= RTT;
+
+                        wTimeMs = Math.ceil(wTimeMs/1000);
+                        bTimeMs = Math.ceil(bTimeMs/1000)
+
+                        updateTimersFromServer(wTimeMs, bTimeMs);
+                        timeStamps.push([wTimeMs, bTimeMs]);
                     }
 
+                    makeMove(lastMove, true);
                     updateMoveHistory(lastMove, currentTurn, board.fen());
+
                     changeTurn();
-                    handleTurnTimer();
+                    handleTurnTimer();                    
                 }
                 break;
 
             case 'newmove': // A move was made (opponent)
-                // Example: newmove e2e4 
                 if(currentMoveIndex != moveHistory.length - 1) {
                     board.position(moveHistory[moveHistory.length - 1], false);
                     currentMoveIndex = moveHistory.length - 1;
                 }
 
-                const uciMove = parts[1];
+                let wsec = parseInt(parts[2], 10);
+                let wnsec = parseInt(parts[3], 10);
+                let bsec = parseInt(parts[4], 10);
+                let bnsec = parseInt(parts[5], 10);
 
-                if(isCastle(uciMove, false)) {
-                    board.position(board.position(), false);
-                }
-                else if(uciMove.length == 5) {
-                    let position = board.position();
-                    const newPiece = uciMove[4];
+                let wTimeMs = wsec * 1000 + wnsec / 1e6;
+                let bTimeMs = bsec * 1000 + bnsec / 1e6;
 
-                    let from = uciMove.substring(0, 2);
-                    let to = uciMove.substring(2, 4);
+                wTimeMs = Math.ceil(wTimeMs/1000);
+                bTimeMs = Math.ceil(bTimeMs/1000);
 
-                    position[to] = newPiece;
-                    delete position[from];
+                updateTimersFromServer(wTimeMs, bTimeMs);
+                timeStamps.push([wTimeMs, bTimeMs]);
 
-                    board.position(position, false);
-                }
-                else {
-                    board.move(`${uciMove.substring(0, 2)}-${uciMove.substring(2, 4)}`);
-                    board.position(board.position(), false);
-                }
+                makeMove(parts[1], false);
+                updateMoveHistory(parts[1], currentTurn, board.fen());
 
-                const newFen = board.fen();
-                updateMoveHistory(uciMove, currentTurn, newFen);
                 changeTurn();
                 handleTurnTimer();
                 break;
@@ -230,7 +255,6 @@
                 handleGameResult(parts[1], parts[2], parts[3], parts[4]);
                 break;
 
-            // Other cases remain the same
             case 'draw':
                 if(!drawOfferModal) drawOfferModal = document.getElementById('draw-offer-modal');
                 drawOfferModal.classList.remove('hidden');
@@ -242,9 +266,6 @@
             case 'chat':
                 const chatMsg = parts.slice(1).join(' ');
                 addChatMessage(opponentName, chatMsg);
-                break;
-            case 'time':
-                updateTimersFromServer(parts[1], parts[2]);
                 break;
             case 'dr':
                 addChatMessage("System", "Your draw offer was rejected.");
@@ -313,7 +334,7 @@
     }
 
     function onDrop(source, target) {
-        if(source === target || isGameOver) return;
+        if(isGameOver) return;
         
         const position = board.position();
         const piece = position[source];
@@ -332,8 +353,49 @@
 
         // We no longer validate the move here. Just send it to the server.
         console.log(`Sending move: move ${source}${target}`);
+        sentTime = performance.now();
         socket.send(`move ${source}${target}`);
         lastMove = `${source}${target}`;
+    }
+
+    function makeMove(move, madeOnBoard) {
+        let source = move.substring(0, 2);
+        let target = move.substring(2, 4);
+
+        let position = board.position();
+        const piece = madeOnBoard ? position[target] : position[source];
+        const color = piece.charAt(0);
+
+        if(move.length == 5) {
+            delete position[source];
+            position[target] =  color + move[4].toUpperCase();
+
+            board.position(position, false);
+        }
+        else if(isCastle(move, madeOnBoard)) {
+            board.position(board.position(), false);
+        }
+        else if(piece.charAt(1) === 'P' && target == enpassantSquare) {
+            let rank = parseInt(target[1], 10);
+            let captureSquare = target[0] + (color == 'w' ? (rank - 1) : (rank + 1));
+
+            delete position[captureSquare];
+            delete position[source];
+            position[target] = piece;
+
+            board.position(position, false);
+        }
+        else {
+            board.move(`${move.substring(0, 2)}-${move.substring(2, 4)}`);
+            board.position(board.position(), false);
+        }
+
+        // update enpassant square
+        if (piece.charAt(1) === 'P' && Math.abs(parseInt(source[1]) - parseInt(target[1])) === 2) {
+            const middleRank = (parseInt(source[1]) + parseInt(target[1])) / 2;
+            enpassantSquare = target[0] + middleRank;
+        }
+        else enpassantSquare = null;
     }
 
     function showPromotionDialog(source, target) {
@@ -377,6 +439,9 @@
         if (movesTbody) {
             movesTbody.innerHTML = ''; // This clears all rows
         }
+
+        moveHistory = ['start'];
+        currentMoveIndex = 0;
     }
 
 
@@ -385,8 +450,8 @@
         nextBtn.disabled = currentMoveIndex >= moveHistory.length - 1;
     }
 
-    function replaceGameActionsWithRematchOptions() {
-        const actionsContainer = document.querySelector('.bg-white .grid.grid-cols-2');
+    function replaceDrawOptionsWithRematchOptions() {
+        const actionsContainer = document.getElementById('game-actions');
         if (!actionsContainer) return;
 
         actionsContainer.innerHTML = ''; // Clear existing buttons
@@ -427,10 +492,77 @@
                 }
             }
         );
+
+        // Create a wrapper div for the grid layout
+        const gridWrapper = document.createElement('div');
+        gridWrapper.className = 'grid grid-cols-2 gap-3';
+
+        gridWrapper.appendChild(rematchBtn);
+        gridWrapper.appendChild(newGameBtn);
+
+        actionsContainer.appendChild(gridWrapper);
+    }
+
+
+    function replaceRematchOptionsWithDrawOptions() {
+        const actionsContainer = document.getElementById('game-actions');
+        if (!actionsContainer) return;
+
+        actionsContainer.innerHTML = ''; // Clear existing buttons
+
+        const createButton = (text, bgColor, hoverColor, handler) => {
+            const btn = document.createElement('button');
+            btn.textContent = text;
+            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg hover:${hoverColor} transition duration-200`;
+            btn.onclick = handler;
+            return btn;
+        };
+
+        const drawBtn = createButton(
+            'Offer Draw',
+            'bg-blue-600',
+            'bg-blue-700',
+            () => {
+                if(socket) {
+                    socket.send('req-draw');
+                }
+            }
+        );
+
+        const resignBtn = createButton(
+            'Resign',
+            'bg-red-600',
+            'bg-red-700',
+            () => {
+                if(socket) {
+                    socket.send('resign');
+                }
+            }
+        );
+
+        // Create a wrapper div for the grid layout
+        const gridWrapper = document.createElement('div');
+        gridWrapper.className = 'grid grid-cols-2 gap-3';
+
+        gridWrapper.appendChild(drawBtn);
+        gridWrapper.appendChild(resignBtn);
+
+        actionsContainer.appendChild(gridWrapper);
     }
 
 
     function handleGameResult(result, reason, whiteScore, blackScore) {
+        if(reason === 'Timeout') {
+            if(whiteTime < blackTime) {
+                whiteTime = 0;
+            }
+            else {
+                blackTime = 0;
+            }
+            updateTimersDisplay();
+            timeStamps.push([whiteTime, blackTime]);
+        }
+
         const modal = document.getElementById('game-over-modal');
         const title = document.getElementById('game-over-title');
         const message = document.getElementById('game-over-message');
@@ -458,7 +590,7 @@
         modal.classList.remove('hidden');
 
         // Also update the right panel actions
-        replaceGameActionsWithRematchOptions();
+        replaceDrawOptionsWithRematchOptions();
     }
 
     function updateTimersFromServer(wTimeStr, bTimeStr) {
@@ -474,11 +606,17 @@
     }
 
     function updateTimersDisplay() {
-        const playerTimerEl = document.getElementById('player-timer');
-        const opponentTimerEl = document.getElementById('opponent-timer');
+        const bottomTimer = document.getElementById('bottom-timer');
+        const topTimer = document.getElementById('top-timer');
 
-        playerTimerEl.textContent = formatTime(playerColor === 'w' ? whiteTime : blackTime);
-        opponentTimerEl.textContent = formatTime(playerColor === 'b' ? whiteTime : blackTime);
+        if(isBottomWhite) {
+            bottomTimer.textContent = whiteTime;
+            topTimer.textContent = blackTime;
+        }
+        else {
+            bottomTimer.textContent = blackTime;
+            topTimer.textContent = whiteTime;
+        }
     }
 
     function addChatMessage(sender, message) {
@@ -499,7 +637,7 @@
         stopTimers();
         whiteTimerInterval = setInterval(() => {
             if (whiteTime > 0) whiteTime--;
-            updateTimersDisplay();
+            if(currentMoveIndex == moveHistory.length - 1) updateTimersDisplay();
             if (whiteTime <= 0) stopTimers();
         }, 1000);
     }
@@ -508,7 +646,7 @@
         stopTimers();
         blackTimerInterval = setInterval(() => {
             if (blackTime > 0) blackTime--;
-            updateTimersDisplay();
+            if(currentMoveIndex == moveHistory.length - 1) updateTimersDisplay();
             if (blackTime <= 0) stopTimers();
         }, 1000);
     }
@@ -525,11 +663,40 @@
         }
     }
 
+    function updateTimersAt(index) {
+        const ts = timeStamps[index] || [600, 600];
+
+        if(isBottomWhite) {
+            document.getElementById('bottom-timer').innerText = formatTime(ts[0]);
+            document.getElementById('top-timer').innerText = formatTime(ts[1]);
+        }
+        else {
+            document.getElementById('bottom-timer').innerText = formatTime(ts[1]);
+            document.getElementById('top-timer').innerText = formatTime(ts[0]);
+        }
+    }
+
+
+    function changeOrientation() {
+        let bottomNameEle = document.getElementById('bottom-name')
+        let topNameEle = document.getElementById('top-name');
+        
+        const bottomName = bottomNameEle.innerText;
+
+        bottomNameEle.innerText = topNameEle.innerText;
+        topNameEle.innerText = bottomName;
+
+        isBottomWhite = !isBottomWhite;
+
+        updateTimersDisplay();
+
+        board.orientation(isBottomWhite ? 'white' : 'black');
+    }
+
     // Insert Game Actions dynamically
     function insertGameActions(container) {
         const actionsHTML = `
             <div id="game-actions">
-                <h3 class="text-2xl font-bold mb-3 text-center">Actions</h3>
                 <div class="grid grid-cols-2 gap-3">
                     <button id="draw-btn" class="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition duration-200">Offer Draw</button>
                     <button id="resign-btn" class="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition duration-200">Resign</button>
@@ -602,6 +769,14 @@
         document.body.insertAdjacentHTML('beforeend', promotionDialogHTML);
     }
 
+    function insertOverlay() {
+        const overlayHTML = `
+            <div id="overlay"> You are being matched with an opponent... </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', overlayHTML);
+    }
+
 
     async function getUserStatus() {
         try {
@@ -617,8 +792,10 @@
             const data = await response.json();
 
             if(data.loggedIn === true) {
-                document.getElementById("player-name").innerText = data.username;
+                document.getElementById("bottom-name").innerText = data.username;
                 myName = data.username;
+
+                console.log(`Username: ${myName}`);
             }  
             else {
                 console.log("User is not logged in");
@@ -641,21 +818,6 @@
         overlay.style.display = "none";
     }
 
-    function resetGameActions(container) {
-        const existing = container.querySelector('#game-actions');
-        if (existing) {
-            existing.remove(); // remove old actions
-        }
-
-        // // Optionally remove any <hr> after it if added
-        // const hr = container.querySelector('hr');
-        // if (hr && !container.querySelector('#game-actions')) {
-        //     hr.remove();
-        // }
-
-        insertGameActions(container); // re-insert original actions
-    }
-
 
     // --- Event Listeners ---
     function setupEventListeners() {
@@ -664,6 +826,7 @@
             if (currentMoveIndex > 0) {
                 currentMoveIndex--;
                 board.position(moveHistory[currentMoveIndex], false); // No animation
+                updateTimersAt(currentMoveIndex);
                 updateNavButtons();
             }
         });
@@ -672,6 +835,7 @@
             if (currentMoveIndex < moveHistory.length - 1) {
                 currentMoveIndex++;
                 board.position(moveHistory[currentMoveIndex], false); // No animation
+                updateTimersAt(currentMoveIndex);
                 updateNavButtons();
             }
         });
@@ -681,8 +845,9 @@
             if (target) {
                 const moveIndex = parseInt(target.dataset.moveIndex, 10);
                 if (!isNaN(moveIndex) && moveIndex < moveHistory.length) {
-                    currentMoveIndex = moveIndex;
+                    currentMoveIndex = moveIndex+1;
                     board.position(moveHistory[currentMoveIndex], false);
+                    updateTimersAt(currentMoveIndex);
                     updateNavButtons();
                 }
             }
@@ -722,7 +887,7 @@
     }
 
     // --- Initialization ---
-    function init() {
+    async function init() {
         const config = {
             draggable: true,
             position: 'start',
@@ -741,7 +906,7 @@
 
         showOverlay('');
 
-        getUserStatus();
+        await getUserStatus();
         initWebSocket();
         setupEventListeners();
         updateNavButtons();
@@ -759,6 +924,8 @@
     insertModals();
 
     insertPromotionDialog();
+
+    insertOverlay();
 
     // Start the application
     init();

@@ -20,6 +20,9 @@ CheckType PawnMoveManager::handlePromotion(Piece newPiece, bool isPieceWhite, co
         // throw error
         throw InvalidMovePatternException("Invalid move pattern for a pawn. New square doesn't have an opponent piece to capture. Move number: " + std::to_string(board.getMoveNumber() + 1) + std::string(". Move: ") + std::string(move.uciMove));
     }
+    else if(move.fromCol == move.toCol && (board.getAllPiecesBitBoard() & (1ULL << move.toSquare)) != 0) {
+        throw BlockedMoveException("The pawn is blocked. Move number: " + std::to_string(board.getMoveNumber() + 1) + std::string(". Move: ") + std::string(move.uciMove));
+    }
 
     if(capturedPiece != Piece::EMPTY && isPieceWhite == (int)capturedPiece < 6) {
         // throw error
@@ -75,7 +78,7 @@ CheckType PawnMoveManager::handlePromotion(Piece newPiece, bool isPieceWhite, co
 
 CheckType PawnMoveManager::handleMove(bool isPieceWhite, const Move& move, Board& board) {
     // check move pattern
-    if((isPieceWhite ? move.fromRow - move.toRow > 0 : move.fromRow - move.toRow < 0) || (abs(move.fromRow - move.toRow) == 2 && (move.fromRow != 6 && move.fromRow != 1)) || abs(move.fromRow - move.toRow) > 2) {
+    if((isPieceWhite ? move.fromRow - move.toRow >= 0 : move.fromRow - move.toRow <= 0) || (abs(move.fromRow - move.toRow) == 2 && (move.fromRow != 6 && move.fromRow != 1)) || abs(move.fromRow - move.toRow) > 2 || abs(move.fromCol - move.toCol) > 1) {
         // throw error
         throw InvalidMovePatternException("Invalid move pattern for a pawn. Move number: " + std::to_string(board.getMoveNumber() + 1) + std::string(". Move: ") + std::string(move.uciMove)); 
     }
@@ -92,6 +95,10 @@ CheckType PawnMoveManager::handleMove(bool isPieceWhite, const Move& move, Board
     if(move.fromCol != move.toCol && (capturedPiece == Piece::EMPTY && move.toSquare != board.enpassantSquare)) {
         // throw error
         throw InvalidMovePatternException("Invalid move pattern for a pawn. New square doesn't have an opponent piece to capture. Move number: " + std::to_string(board.getMoveNumber() + 1) + std::string(". Move: ") + std::string(move.uciMove));
+    }
+    else if(move.fromCol == move.toCol && capturedPiece != Piece::EMPTY) {
+        // throw error
+        throw BlockedMoveException("The pawn is blocked. Move number: " + std::to_string(board.getMoveNumber() + 1) + std::string(". Move: ") + std::string(move.uciMove));
     }
 
     if((pathMask & board.getAllPiecesBitBoard()) != 0 || (capturedPiece != Piece::EMPTY && isPieceWhite == (int)capturedPiece < 6)) {
@@ -381,7 +388,7 @@ CheckType QueenMoveManager::handleMove(bool isPieceWhite, const Move& move, Boar
 CheckType KingMoveManager::handleMove(bool isPieceWhite, const Move& move, Board& board) {
     // check move pattern
     if(abs(move.fromCol - move.toCol) == 2 && move.fromRow == move.toRow && (isPieceWhite ? move.fromSquare == 3 : move.fromSquare == 59)) {
-        return handleKingCastle(move.toCol == 1, isPieceWhite, board);
+        return handleKingCastle(move.toCol == 1 || move.toCol == 57, isPieceWhite, board);
     }
 
     if(abs(move.fromRow - move.toRow) > 1 || abs(move.fromCol - move.toCol) > 1) {
@@ -435,12 +442,20 @@ CheckType KingMoveManager::handleKingCastle(bool shortSide, bool isPieceWhite, B
     int rookSquare = isPieceWhite ? (shortSide ? 0 : 7) : (shortSide ? 56 : 63);
     int rookToSquare = shortSide ? kingToSquare + 1 : kingToSquare - 1;
 
+    uint64_t inBetweenMask = rangeMasks[kingSquare][rookSquare];
+    inBetweenMask &= ~(1ULL << kingSquare);
+    inBetweenMask &= ~(1ULL << rookSquare);
+    
+    // if there are pieces between king and rook
+    if((inBetweenMask & board.getAllPiecesBitBoard()) != 0) {
+        throw KingCastleException("There are pieces between rook and " + std::string(isPieceWhite ? "White King." : "Black King.") + std::string(" Move number: " + std::to_string(board.getMoveNumber() + 1)));
+    }
+
     // mask from king square to destination king square
-    uint64_t inBetweenMask = rangeMasks[kingSquare][kingToSquare];
-    inBetweenMask &= ~(1ULL << kingToSquare);
+    uint64_t checkMask = rangeMasks[kingSquare][kingToSquare];
 
     // if the king path squares are attacked, castling is not possible, throw error
-    if((inBetweenMask & generateLegalAttacksForColor(!isPieceWhite, false, true, false, board) != 0)) {
+    if((checkMask & generateLegalAttacksForColor(!isPieceWhite, false, true, false, board)) != 0) {
         // throw error
         throw KingCastleException("There are pieces attacking " + std::string(isPieceWhite ? "White King " : "Black King ") + "on it's path of castling." + std::string("Move number: " + std::to_string(board.getMoveNumber() + 1)));
     }

@@ -1042,6 +1042,8 @@ void calculateMoveResult(CheckType check, uint64_t positionHash, bool isWhiteTur
 
     if((defenderLegalMoves & kingToCheckingPieceMask) == 0) {
         if(isWhiteTurn) board.blackKingCheckmated = true;
+        else board.whiteKingCheckmated = true;
+        
         board.setGameResult(isWhiteTurn ? GameResult::WHITE_WON_BY_CHECKMATE : GameResult::BLACK_WON_BY_CHECKMATE);
         return;
     }

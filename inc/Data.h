@@ -2,7 +2,7 @@
 
 #include "uv.h"
 #include "App.h"
-#include "libusockets.h"
+#include "uv.h"
 #include "LegalChess.h"
 #include "jwt.h"
 #include <pqxx/pqxx>
@@ -72,6 +72,7 @@ public:
     us_timer_t* abandonTimer_;
 
     PlayerData();
+    ~PlayerData();
     PlayerData(PlayerData&& other);
 
     void startAbandonTimer();
@@ -81,6 +82,7 @@ public:
 struct GameManager {
 public:
     GameManager(int id, PlayerData* whiteData, PlayerData* blackData);
+    ~GameManager();
 
     void gameResultHandler(bool isDraw, bool whiteWon, std::string_view reason, std::string dbReason);
     void randGameResultHandler(bool isDraw, bool whiteWon, std::string reason);
@@ -92,12 +94,12 @@ public:
     PlayerData* whiteData_;
     PlayerData* blackData_;
     float whiteScore_, blackScore_;
-    us_timer_t* syncTimer_;
+    std::string timeStamps_;
+    uv_timer_t* syncTimer_;
 
 private:
-    void createSyncTimer();
     void destroySyncTimer();
-    void gameResultDBHandler(std::string dbReason, bool isDraw, bool whiteWon, std::string moveHistory);
+    void gameResultDBHandler(std::string dbReason, bool isDraw, bool whiteWon, std::string moveHistory, std::string timeStamps);
     void resetData();
 };
 

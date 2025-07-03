@@ -1,5 +1,7 @@
 #include "Data.h"
 
+extern std::shared_ptr<uv_loop_t> uv_loop;
+
 void timerCallback(uv_poll_t* poll, int status, int events) {
     if(status < 0) {
         perror("Something went wrong with player timer expiry");
@@ -35,10 +37,13 @@ void timerCallback(uv_poll_t* poll, int status, int events) {
 
         expiredPlayerData->gameManager_->gameResultHandler(isDraw, whiteWon, "Timeout", "t");
     }
+    else {
+        std::cerr << "Timer event is not readable\n";
+    }
 }
 
 MoveTimer::MoveTimer(int timeInSeconds, uv_loop_t* loop, void* extData) {
-    initSeconds_ = timeRemainingSeconds_;
+    initSeconds_ = timeInSeconds;
     timeRemainingSeconds_ = timeInSeconds;
     poll_ = new uv_poll_t();
     timeRemainingNanoSeconds_ = 0;
@@ -95,6 +100,8 @@ std::pair<int, uint32_t> MoveTimer::getRemainingTime() {
 }
 
 void MoveTimer::start() {
+    std::cout << "Move Timer start\n";
+
     itimerspec startSpec;
     memset(&startSpec, 0, sizeof(startSpec));
 
@@ -224,6 +231,8 @@ PlayerData::PlayerData(PlayerData&& other) : moveTimer_(std::move(other.moveTime
     other.isMyTurn_ = false;
 }
 
+PlayerData::~PlayerData() = default;
+
 void PlayerData::startAbandonTimer() {
     PlayerData* thisData = this;
     memcpy(us_timer_ext(abandonTimer_), &thisData, sizeof(thisData));
@@ -243,12 +252,23 @@ void PlayerData::stopAbandonTimer() {
     us_timer_set(abandonTimer_, [](us_timer_t* timer){}, 0, 0);
 }
 
-GameManager::GameManager(int id, PlayerData* whiteData, PlayerData* blackData) : gameID_(id), whiteData_(whiteData), blackData_(blackData), whiteScore_(0), blackScore_(0) {
+GameManager::GameManager(int id, PlayerData* whiteData, PlayerData* blackData) : gameID_(id), whiteData_(whiteData), blackData_(blackData), whiteScore_(0), blackScore_(0), syncTimer_(new uv_timer_t()), timeStamps_("300-300 ") {
     sGameID_ = std::to_string(id);
-    createSyncTimer();
+    syncTimer_->data = this;
+    if(uv_timer_init(uv_loop.get(), syncTimer_) == -1) std::cerr << "Sync timer init failed\n";
+}
+
+GameManager::~GameManager() {
+    destroySyncTimer();
 }
 
 void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view reason, std::string dbReason) {
+    std::string moveHistory = whiteData_->chess_->getMoveHistory();
+    std::string timeStamps = timeStamps_;
+    timeStamps.pop_back();
+
+    resetData();
+
     std::string result;
 
     if(isDraw) {
@@ -270,12 +290,7 @@ void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view
     if(whiteData_->ws_) whiteData_->ws_->send(toSend, uWS::OpCode::TEXT);
     if(blackData_->ws_) blackData_->ws_->send(toSend, uWS::OpCode::TEXT);
 
-    std::string moveHistory = whiteData_->chess_->getMoveHistory();
-    std::cout << "db reason: " << dbReason << "moves: " << moveHistory << std::endl;
-
-    resetData();
-
-    gameResultDBHandler(dbReason, isDraw, whiteWon, moveHistory);    
+    gameResultDBHandler(dbReason, isDraw, whiteWon, moveHistory, timeStamps);    
 }
 
 void GameManager::randGameResultHandler(bool isDraw, bool whiteWon, std::string reason) {
@@ -303,22 +318,16 @@ void GameManager::randGameResultHandler(bool isDraw, bool whiteWon, std::string 
     if(blackData_) blackData_->ws_->send(toSend, uWS::OpCode::TEXT);
 }
 
-void GameManager::createSyncTimer() {
-    syncTimer_ = us_create_timer((us_loop_t*)uWS::Loop::get(), 1, sizeof(GameManager*));
-    GameManager* thisData = this;
-    memcpy(us_timer_ext(syncTimer_), &thisData, sizeof(thisData));
-}
 
 void GameManager::destroySyncTimer() {
-    us_timer_close(syncTimer_);
-    syncTimer_ = nullptr;
+    uv_close(reinterpret_cast<uv_handle_t*>(syncTimer_), [](uv_handle_t* handle) {
+        delete reinterpret_cast<uv_timer_t*>(handle);
+    });
 }
 
 void GameManager::startSyncTimer() {
-    us_timer_set(syncTimer_, [](us_timer_t* timer){
-        GameManager * gameManager;
-
-        memcpy(&gameManager, us_timer_ext(timer), sizeof(gameManager));
+    uv_timer_start(syncTimer_, [](uv_timer_t* timer){
+        GameManager * gameManager = (GameManager*)timer->data;
 
         json timeUpdate;
         timeUpdate["type"] = "timeUpdate";
@@ -331,15 +340,16 @@ void GameManager::startSyncTimer() {
 
         gameManager->whiteData_->ws_->send(timeUpdate.dump(), uWS::OpCode::TEXT);
         gameManager->blackData_->ws_->send(timeUpdate.dump(), uWS::OpCode::TEXT);
+        std::cout << "Sent Time Update\n";
 
     }, 1000, 1000);
 }
 
 void GameManager::stopSyncTimer() {
-    us_timer_set(syncTimer_, [](us_timer_t* timer){}, 0, 0);
+    uv_timer_stop(syncTimer_);
 }
 
-void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool whiteWon, std::string moveHistory) {
+void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool whiteWon, std::string moveHistory, std::string timeStamps) {
     std::cout << "DB Handler: " << dbReason << " " << moveHistory << std::endl;
 
     std::string gameResult, whiteResult, blackResult;
@@ -357,14 +367,14 @@ void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool wh
         blackResult = "w";
     }
 
-    tPool.submit([this, dbReason, gameResult, whiteResult, blackResult, moveHistory]() {
+    tPool.submit([this, dbReason, gameResult, whiteResult, blackResult, moveHistory, timeStamps]() {
         auto connHandle = cPool.acquire();
         pqxx::work txn(*connHandle->get());
 
         try {
             pqxx::result txnResult = txn.exec(
-                pqxx::zview("UPDATE game SET move_history = $1, reason = $2, result = $3 WHERE id = $4;"),
-                pqxx::params(moveHistory, dbReason, gameResult, gameID_)
+                pqxx::zview("UPDATE game SET move_history = $1, reason = $2, result = $3, move_time_stamp = $4 WHERE id = $5;"),
+                pqxx::params(moveHistory, dbReason, gameResult, timeStamps, gameID_)
             );
 
             txn.exec(
@@ -400,6 +410,7 @@ void GameManager::resetData() {
     blackData_->chess_ = whiteData_->chess_ = std::make_shared<LC::LegalChess>();
     whiteData_->askedRematch_ = whiteData_->inGame_ = whiteData_->isWhite_ = whiteData_->offeredDraw_ = false;
     blackData_->askedRematch_ = blackData_->inGame_ = blackData_->isWhite_ = blackData_->offeredDraw_ = false;
+    timeStamps_ = "";
 }
 
 GameManagerPointer::GameManagerPointer() : pointer(nullptr) {}

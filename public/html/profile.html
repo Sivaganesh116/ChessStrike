@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en" class="bg-gray-900 text-white">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chess Player Profile</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-start py-10 px-4">
+  <div class="max-w-4xl w-full bg-gray-800 p-6 rounded-xl shadow-2xl">
+    <h1 id="player-name" class="text-3xl font-bold mb-6 text-center">Chess Player Profile</h1>
+
+    <!-- Stats -->
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-6 mb-8 text-center">
+      <div class="bg-gray-700 p-4 rounded-lg shadow">
+        <h2 class="text-xl font-semibold">Games Played</h2>
+        <p id="total-games" class="text-2xl mt-2">0</p>
+      </div>
+      <div class="bg-green-700 p-4 rounded-lg shadow">
+        <h2 class="text-xl font-semibold">Wins</h2>
+        <p id="wins" class="text-2xl mt-2">0</p>
+      </div>
+      <div class="bg-red-700 p-4 rounded-lg shadow">
+        <h2 class="text-xl font-semibold">Losses</h2>
+        <p id="losses" class="text-2xl mt-2">0</p>
+      </div>
+      <div class="bg-yellow-600 p-4 rounded-lg shadow">
+        <h2 class="text-xl font-semibold">Draws</h2>
+        <p id="draws" class="text-2xl mt-2">0</p>
+      </div>
+      <div class="bg-green-700 p-4 rounded-lg text-center shadow">
+        <h2 class="text-xl font-semibold">Win Percentage</h2>
+        <p id="win-percentage" class="text-2xl mt-2 text-white">0%</p>
+      </div>
+      <div class="bg-gray-700 p-4 rounded-lg text-center shadow">
+        <h2 class="text-xl font-semibold">Joined On</h2>
+        <p id="joined-on" class="text-2xl mt-2 text-white">0%</p>
+      </div>
+      <div class="col-span-2 sm:col-span-3 flex justify-center mt-4">
+        <button id="watch-btn" class="bg-blue-600 px-6 py-2 text-lg font-semibold rounded-lg shadow hover:bg-blue-500 transition disabled:opacity-40" disabled>Watch Game</button>
+      </div>
+    </div>
+
+    <!-- Game History -->
+    <div>
+      <h2 class="text-2xl font-bold mb-4">Game History</h2>
+      <div class="overflow-x-auto">
+        <table class="min-w-full bg-gray-700 rounded-lg overflow-hidden">
+          <thead>
+            <tr class="bg-gray-600 text-left text-sm uppercase text-gray-300">
+              <th class="p-4">Game</th>
+              <th class="p-4">Result</th>
+              <th class="p-4">Reason</th>
+              <th class="p-4">Date</th>
+            </tr>
+          </thead>
+          <tbody id="game-history" class="text-sm divide-y divide-gray-600">
+            <!-- Game rows will go here -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlay"> You are being matched with an opponent... </div>
+
+  <script>
+    function showOverlay(message) {
+        const overlay = document.getElementById("overlay");
+        if(message.length > 0) overlay.textContent = message;
+        overlay.style.display = "flex";
+    }
+
+
+    function hideOverlay() {
+        const overlay = document.getElementById("overlay");
+        overlay.style.display = "none";
+    }
+
+    hideOverlay();
+
+    let playerId = null;
+    let playerName = null;
+
+    const charToReason = {
+        r: "Repitition",
+        c: "Checkmate",
+        t: "Timeout",
+        a: "Agreement",
+        f: "Fifty Half Moves",
+        s: "Stalemate",
+        A: "Abandonment",
+        R: "Resignation"
+    };
+
+    async function fetchPlayerInfo() {
+      try {
+        const path = window.location.pathname;
+        playerName = path.slice(path.lastIndexOf('/') + 1);
+
+        const res = await fetch(`/player-info/${playerName}`);
+        if(!res.ok) {
+            showOverlay(`The player: ${playerName} doesn't exist`);
+            return;
+        }
+        
+        const data = await res.json();
+
+        document.getElementById("player-name").textContent = playerName;
+        document.getElementById("joined-on").textContent = `${data.joined_on}`;
+
+        playerId = data.id;
+        
+        let totalGames = data.total;
+        let wins = data.won;
+        let losses = data.lost;
+        let draws = totalGames - wins - losses;
+        let history = data.games;
+
+
+        // Update stats
+        document.getElementById("total-games").textContent = totalGames;
+        document.getElementById("wins").textContent = wins;
+        document.getElementById("losses").textContent = losses;
+        document.getElementById("draws").textContent = draws;
+
+        const winPct = totalGames ? ((wins / totalGames) * 100).toFixed(1) : 0;
+        document.getElementById("win-percentage").textContent = `${winPct}% win rate`;
+
+        // Populate game history
+        const tbody = document.getElementById("game-history");
+        tbody.innerHTML = "";
+        history.forEach(game => {
+            const playerColor = (game.white === playerName) ? 'w' : 'b';
+
+            const whiteClass = game.white === playerName ? 'text-blue-400 font-semibold' : 'text-gray-300';
+            const blackClass = game.black === playerName ? 'text-blue-400 font-semibold' : 'text-gray-300';
+
+            // Determine result relative to player
+            let resultText = "";
+            if (game.result === "d") {
+                resultText = "Draw";
+            } else if (game.result === playerColor === "white") {
+                resultText = `${playerName} won`;
+            } else {
+                resultText = `${playerName} lost`;
+            }
+
+            // Format date
+            const formattedDate = new Date(game.created).toLocaleDateString();
+
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <td class="p-4 text-sm leading-5">
+                  <div class="font-medium">
+                    ♔ <span class="${whiteClass} cursor-pointer" data-player="${game.white}">${game.white}</span>
+                  </div>
+                  <div>
+                    ♚ <span class="${blackClass} cursor-pointer" data-player="${game.black}">${game.black}</span>
+                  </div>
+                </td>
+                <td class="p-4">${resultText}</td>
+                <td class="p-4">${charToReason[game.reason]}</td>
+                <td class="p-4">${formattedDate}</td>
+            `;
+
+
+            // Handle player name clicks
+            row.querySelectorAll("[data-player]").forEach(span => {
+              span.addEventListener("click", (e) => {
+                e.stopPropagation(); // Prevent row click
+                const username = span.getAttribute("data-player");
+                window.location.href = `/player/${username}`;
+              });
+            });
+
+            tbody.appendChild(row);
+        });
+      } catch (error) {
+        console.error("Failed to fetch player info:", error);
+      }
+    }
+
+    async function updateWatchStatus() {
+        if (!playerId) return;
+
+        try {
+            const res = await fetch(`/live-game/${playerId}`);
+            if(!res.ok) return;
+            const data = await res.json();
+
+            // console.log(data);
+
+            const watchBtn = document.getElementById("watch-btn");
+
+            if (data.isPlaying && data.gameID) {
+                watchBtn.disabled = false;
+                watchBtn.onclick = () => {
+                    window.location.href = `/game/${data.gameID}`;
+                };
+            } else {
+                watchBtn.disabled = true;
+                watchBtn.onclick = null; // remove any previous handler
+            }
+        } catch (err) {
+            console.error("Failed to check live game status:", err);
+        }
+    }
+
+
+    // Load on page
+    fetchPlayerInfo().then(() => {
+      updateWatchStatus();
+      setInterval(updateWatchStatus, 2000);
+    });
+
+  </script>
+</body>
+</html>

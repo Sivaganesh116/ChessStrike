@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!-- <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -74,5 +74,320 @@
     </main>
 
     <script src="/js/home.js"></script>
+</body>
+</html> -->
+
+<!DOCTYPE html>
+<html lang="en" class="bg-gray-900 text-white">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chess Strike - Home</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen flex flex-col">
+  <!-- Navbar -->
+  <nav class="w-full bg-gray-800 p-4 flex justify-between items-center shadow">
+    <a href="/" class="text-2xl font-bold text-white">Chess Strike</a>
+    <div id="auth-area" class="flex gap-4 relative"></div>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-5xl mx-auto py-10 px-4">
+    <!-- Welcome Message -->
+    <div class="text-center mb-6">
+      <h1 id="welcome-message" class="text-2xl font-semibold"></h1>
+    </div>
+
+    <!-- Play Button -->
+    <div class="text-center mb-10">
+      <button id="play-button" disabled class="bg-blue-600 px-6 py-3 text-lg rounded-lg shadow font-semibold cursor-not-allowed opacity-50">Log in to Play</button>
+    </div>
+
+    <!-- Live Games -->
+    <section class="mb-16">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-2xl font-bold">Live Games</h2>
+        <div class="flex gap-2">
+          <button id="refresh-live" class="bg-gray-700 px-3 py-2 rounded hover:bg-gray-600">Refresh</button>
+          <button id="load-more-live" class="bg-gray-700 px-3 py-2 rounded hover:bg-gray-600">+</button>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <p id="no-live-games" class="hidden">There are no live games currenlty.</p>
+        <table id="live-games-table" class="min-w-full bg-gray-700 rounded-lg overflow-hidden">
+          <thead>
+            <tr class="bg-gray-600 text-left text-sm uppercase text-gray-300">
+              <th class="p-4">Players</th>
+              <th class="p-4">Time</th>
+            </tr>
+          </thead>
+          <tbody id="live-games" class="text-sm divide-y divide-gray-600"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Game History -->
+    <section>
+      <h2 class="text-2xl font-bold mb-4">Recent Games</h2>
+      <div class="overflow-x-auto" id="games-container">
+        <table class="min-w-full bg-gray-700 rounded-lg overflow-hidden">
+          <thead>
+            <tr class="bg-gray-600 text-left text-sm uppercase text-gray-300">
+              <th class="p-4">Game</th>
+              <th class="p-4">Result</th>
+              <th class="p-4">Reason</th>
+              <th class="p-4">Date</th>
+            </tr>
+          </thead>
+          <tbody id="recent-games" class="text-sm divide-y divide-gray-600"></tbody>
+        </table>
+      </div>
+      <div class="flex justify-center mt-4" id="view-more-container"></div>
+    </section>
+  </main>
+
+  <!-- Modals -->
+  <div id="modal-area"></div>
+
+  <script>
+    const charToReason = {
+        r: "Repitition",
+        c: "Checkmate",
+        t: "Timeout",
+        a: "Agreement",
+        f: "Fifty Half Moves",
+        s: "Stalemate",
+        A: "Abandonment",
+        R: "Resignation"
+    };
+
+    let username = null;
+    let liveCount = 10;
+    let liveGamesReached = false;
+
+    async function getUserStatus() {
+        const res = await fetch('/api/user/status');
+        const data = await res.json();
+        username = data.username;
+        isLoggedIn = data.loggedIn;
+
+        const authArea = document.getElementById('auth-area');
+        const playBtn = document.getElementById('play-button');
+        const viewMore = document.getElementById('view-more-btn');
+        const welcomeMessage = document.getElementById('welcome-message');
+
+        if (data.loggedIn) {
+            welcomeMessage.textContent = `Welcome! ${username}`;
+            playBtn.textContent = "Play Game (5 Min)";
+            playBtn.disabled = false;
+            playBtn.classList.remove("cursor-not-allowed", "opacity-50");
+            playBtn.classList.add("hover:bg-blue-500", "cursor-pointer");
+            playBtn.onclick = () => window.location.href = "/game/new";
+
+            authArea.innerHTML = `
+                <button id="burger" class="text-white focus:outline-none">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                </button>
+                <div id="dropdown" class="hidden absolute right-0 mt-2 w-40 bg-gray-800 rounded shadow-md z-50">
+                    <a href="/player/${username}" class="block px-4 py-2 hover:bg-gray-700">Profile</a>
+                    <a id="logout-btn" href="/logout" class="block px-4 py-2 hover:bg-gray-700">Logout</a>
+                </div>
+            `;
+
+            document.getElementById('burger').onclick = () => {
+                document.getElementById('dropdown').classList.toggle('hidden');
+            };
+
+            document.getElementById('logout-btn').onclick = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/logout');
+                if (res.ok) {
+                    window.location.href = "/";
+                }
+            };
+        } else {
+            welcomeMessage.textContent = "Welcome! Random user";
+            playBtn.textContent = "Log in to Play";
+            playBtn.disabled = true;
+            playBtn.classList.add("cursor-not-allowed", "opacity-50");
+
+            authArea.innerHTML = `
+                <button onclick="showLoginModal()" class="bg-blue-700 px-4 py-2 rounded hover:bg-blue-600">Login</button>
+                <button onclick="showSignupModal()" class="bg-green-700 px-4 py-2 rounded hover:bg-green-600">Signup</button>
+            `;
+        }
+    }
+
+    async function fetchLiveGames() {
+        if (liveGamesReached) return;
+
+        const res = await fetch(`/live-games?count=${liveCount}`);
+        const data = await res.json();
+        if (data.maxGamesReached) {
+            liveGamesReached = true;
+            return;
+        }
+
+        const tbody = document.getElementById('live-games');
+        tbody.innerHTML = "";
+
+        const liveGamesTable = document.getElementById("live-games-table");
+        const noLiveGames = document.getElementById("no-live-games");
+
+        if(data.games.length == 0) {
+            liveGamesTable.classList.add("hidden");
+            noLiveGames.classList.remove("hidden");
+            return;
+        }
+
+        liveGamesTable.classList.remove("hidden");
+        noLiveGames.classList.add("hidden");
+
+        data.games.forEach(game => {
+            const row = document.createElement('tr');
+            row.className = "hover:bg-gray-600 cursor-pointer transition";
+            row.onclick = () => window.location.href = `/game/${game.id}`;
+            row.innerHTML = `
+                <td class="p-4">
+                    ♔ <span class="text-blue-400 cursor-pointer" onclick="event.stopPropagation(); window.location.href='/player/${game.white}'">${game.white}</span><br>
+                    ♚ <span class="text-blue-400 cursor-pointer" onclick="event.stopPropagation(); window.location.href='/player/${game.black}'">${game.black}</span>
+                </td>
+                <td class="p-4">${game.timeControl}</td>
+            `;
+            tbody.appendChild(row);
+      });
+    }
+
+    async function fetchRecentGames() {
+        const tbody = document.getElementById('recent-games');
+        const gamesContainer = document.getElementById('games-container');
+        const viewMoreContainer = document.getElementById('view-more-container');
+
+        tbody.innerHTML = "";
+        viewMoreContainer.innerHTML = "";
+
+        if (!isLoggedIn) {
+            gamesContainer.innerHTML = '<p class="text-gray-400">Login to see your recent games.</p>';
+            return;
+        }
+
+        const res = await fetch('/games');
+        const data = await res.json();
+
+        if (data.games.length === 0) {
+            gamesContainer.innerHTML = '<p class="text-gray-400">You have no recent games, play one!</p>';
+            return;
+        }
+
+        data.games.forEach(game => {
+            const playerColor = (game.white === username) ? 'white' : 'black';
+            let resultText = "";
+            if (game.result === "d") resultText = "Draw";
+            else if ((game.result === "w" && playerColor === "white") || (game.result === "b" && playerColor === "black")) resultText = `${username} won`;
+            else resultText = `${username} lost`;
+
+            const row = document.createElement('tr');
+            row.className = "hover:bg-gray-600 cursor-pointer transition";
+            row.onclick = () => window.location.href = `/game/${game.id}`;
+            row.innerHTML = `
+                <td class="p-4">
+                    ♔ <span class="text-blue-400 cursor-pointer" onclick="event.stopPropagation(); window.location.href='/player/${game.white}'">${game.white}</span><br>
+                    ♚ <span class="text-blue-400 cursor-pointer" onclick="event.stopPropagation(); window.location.href='/player/${game.black}'">${game.black}</span>
+                </td>
+                <td class="p-4">${resultText}</td>
+                <td class="p-4">${charToReason[game.reason]}</td>
+                <td class="p-4">${new Date(game.created).toLocaleDateString()}</td>
+            `;
+            tbody.appendChild(row);
+        });
+
+        if (data.moreGames) {
+            viewMoreContainer.innerHTML = `<a href="/player/${username}" class="bg-blue-700 px-4 py-2 rounded hover:bg-blue-600">View More</a>`;
+        }
+    }
+
+    document.getElementById('refresh-live').onclick = fetchLiveGames;
+    document.getElementById('load-more-live').onclick = () => {
+      if (!liveGamesReached) {
+        liveCount += 10;
+        fetchLiveGames();
+      }
+    };
+
+    getUserStatus().then(() => {
+      fetchLiveGames();
+      fetchRecentGames();
+    });
+
+    function showLoginModal() {
+      document.getElementById("modal-area").innerHTML = `
+        <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+          <div class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+            <h2 class="text-xl font-semibold mb-4">Log In</h2>
+            <input id="login-username" type="text" placeholder="Username" class="w-full mb-3 px-3 py-2 bg-gray-700 rounded">
+            <input id="login-password" type="password" placeholder="Password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+            <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-500 py-2 rounded">Log In</button>
+            <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+          </div>
+        </div>`;
+    }
+
+    function showSignupModal() {
+      document.getElementById("modal-area").innerHTML = `
+        <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+          <div id="signup-step1" class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+            <h2 class="text-xl font-semibold mb-4">Sign Up - Step 1</h2>
+            <input id="signup-username" type="text" placeholder="Choose a username" class="w-full mb-2 px-3 py-2 bg-gray-700 rounded">
+            <p id="username-error" class="text-red-400 text-sm mb-3 hidden">Username already exists. Try a different one.</p>
+            <button onclick="checkUsername()" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Next</button>
+            <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+          </div>
+        </div>`;
+    }
+
+    function checkUsername() {
+      const username = document.getElementById("signup-username").value;
+      fetch(`/username/unique?username=${encodeURIComponent(username)}`)
+        .then(res => res.json())
+        .then(isUnique => {
+          if (isUnique) {
+            document.getElementById("signup-step1").innerHTML = `
+              <h2 class="text-xl font-semibold mb-4">Sign Up - Step 2</h2>
+              <input id="signup-password" type="password" placeholder="Choose a password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+              <button onclick="handleSignup('${username}')" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Sign Up</button>
+              <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            `;
+          } else {
+            document.getElementById("username-error").classList.remove("hidden");
+          }
+        });
+    }
+
+    function handleLogin() {
+      const username = document.getElementById("login-username").value;
+      const password = document.getElementById("login-password").value;
+      fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+      }).then(()=> {
+        location.reload();
+      });
+    }
+
+    function handleSignup(username) {
+      const password = document.getElementById("signup-password").value;
+      fetch("/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+      }).then(() => window.location.reload());
+    }
+
+    function closeModal() {
+      document.getElementById("modal-area").innerHTML = "";
+    }
+  </script>
 </body>
 </html>

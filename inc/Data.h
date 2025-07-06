@@ -25,6 +25,7 @@ extern ThreadPool tPool;
 extern PostgresConnectionPool cPool;
 extern std::unordered_map<int, GameManager*> liveGames;
 extern std::unordered_map<int, GameManager*> playersInGame;
+extern std::unordered_map<int, PlayerData*> closedConnections;
 
 using json = nlohmann::json;
 
@@ -105,10 +106,11 @@ private:
 
 struct GameManagerPointer {
     GameManager* pointer;
+    std::string topic;
 
     GameManagerPointer();
 
-    GameManagerPointer(GameManager* p);
+    GameManagerPointer(GameManager* p, std::string topic);
 
     GameManagerPointer(GameManagerPointer&& other);
 };

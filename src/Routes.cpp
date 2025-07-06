@@ -30,15 +30,80 @@ void initRoutes(uWS::SSLApp & app) {
         .upgrade = watchWSUpgradeHandler,
         .open = [](auto * ws) {
             GameManager* gameMngr = ws->getUserData()->pointer;
-            ws->subscribe(std::to_string(gameMngr->gameID_));
+            ws->subscribe(gameMngr->sGameID_);
 
             auto [wsec, wnsec] = gameMngr->whiteData_->moveTimer_->getRemainingTime();
             auto [bsec, bnsec] = gameMngr->blackData_->moveTimer_->getRemainingTime();
 
-            std::stringstream gameInfo;
-            gameInfo << "info " << gameMngr->whiteData_->name_ << " " << gameMngr->blackData_->name_ << " " << std::to_string(wsec) << " " << std::to_string(bsec) << " " << gameMngr->blackData_->chess_->getMoveHistory() << " " << gameMngr->timeStamps_;
+            json gameJson;
+            gameJson["type"] = "info";
+            gameJson["white"] = gameMngr->whiteData_->name_;
+            gameJson["black"] = gameMngr->blackData_->name_;
+            gameJson["whiteTime"] = std::to_string(wsec);
+            gameJson["blackTime"] = std::to_string(bsec);
+            gameJson["moves"] = gameMngr->whiteData_->chess_->getMoveHistory();
+            gameJson["timeStamps"] = gameMngr->timeStamps_;
             
-            ws->send(gameInfo.str(), uWS::OpCode::TEXT);
+            ws->send(gameJson.dump(), uWS::OpCode::TEXT);
+        },
+        .message = [](auto * ws, std::string_view msg, uWS::OpCode code) {
+            std::cout << msg << std::endl;
+            
+            std::stringstream ss(msg.data());
+            std::string type;
+            ss >> type;
+
+            if(type == "chat") {
+                std::string chatJson;
+                ss >> chatJson;
+
+                GameManager* gameMngr = ws->getUserData()->pointer;
+
+                ws->publish(gameMngr->sGameID_, chatJson, uWS::OpCode::TEXT);
+            }
+            else if(type == "rematch") {
+                std::string sGameID;
+                ss >> sGameID;
+
+                if(sGameID.length() && std::all_of(sGameID.begin(), sGameID.end(), ::isdigit)) {
+                    auto liveGamesIter = liveGames.find(stoi(sGameID));
+
+                    if(liveGamesIter != liveGames.end()) {
+                        auto *newGameMngr = liveGamesIter->second;
+                        auto *gameMngrPointer = ws->getUserData();
+                        
+                        gameMngrPointer->pointer = newGameMngr;
+                        ws->unsubscribe(gameMngrPointer->topic);
+
+                        gameMngrPointer->topic = newGameMngr->sGameID_;
+                        ws->subscribe(newGameMngr->sGameID_);
+
+                        auto [wsec, wnsec] = newGameMngr->whiteData_->moveTimer_->getRemainingTime();
+                        auto [bsec, bnsec] = newGameMngr->blackData_->moveTimer_->getRemainingTime();
+
+                        json gameJson;
+                        gameJson["type"] = "info";
+                        gameJson["white"] = newGameMngr->whiteData_->name_;
+                        gameJson["black"] = newGameMngr->blackData_->name_;
+                        gameJson["whiteTime"] = std::to_string(wsec);
+                        gameJson["blackTime"] = std::to_string(bsec);
+                        gameJson["moves"] = newGameMngr->whiteData_->chess_->getMoveHistory();
+                        gameJson["timeStamps"] = newGameMngr->timeStamps_;
+                        
+                        ws->send(gameJson.dump(), uWS::OpCode::TEXT);
+                    }
+                    else {
+                        std::cout << "Watcher sent an invalid game-id to rematch\n";
+                    }
+                }
+                else {
+                    std::cout << "Watcher sent an invalid game-id to rematch\n";
+                }
+            }
+            else {
+                std::cout << "Watcher sending unwanted data: " << msg << std::endl;
+                return;
+            }
         }
     });
 
@@ -81,13 +146,16 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/game/:id", [](auto * res, auto * req) {
-        serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/game.html", res);
+    app.get("/player/:username", [](auto * res, auto * req) {
+        std::string_view name = req->getParameter("username");
+        
+        serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/profile.html", res);
         res->end();
     });
 
-    // server different js file based ono the role of the user
-    app.get("/game/:id/game.js", [](auto * res, auto * req) {
+
+    app.get("/game/:id", [](auto * res, auto * req) {
+
         std::string sGameID(req->getParameter("id"));
 
         auto cookies = parseCookies(req->getHeader("cookie"));
@@ -97,7 +165,7 @@ void initRoutes(uWS::SSLApp & app) {
         if(it == cookies.end()) {
             // anonymous user tried to create new registered game
             if(sGameID == "new") {
-                res->writeStatus("401 Not Authorised")->end();
+                res->writeStatus("401 Not Authorised")->end("Please log in to start a new game");
             }
             else if(sGameID.length() > 0 && std::all_of(sGameID.begin(), sGameID.end(), ::isdigit)) {
                 int gameID = stoi(sGameID);
@@ -106,11 +174,11 @@ void initRoutes(uWS::SSLApp & app) {
 
                 // not a live game
                 if(liveGameIter == liveGames.end()) {
-                    serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/js/viewer.js", res);
+                    serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/viewer.html", res);
                     res->end();
                 }
                 else {
-                    serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/js/watcher.js", res);
+                    serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/watcher.html", res);
                     res->end();
                 }
             }
@@ -137,35 +205,46 @@ void initRoutes(uWS::SSLApp & app) {
 
             // not a live game
             if(liveGameIter == liveGames.end()) {
-                serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/js/viewer.js", res);
+                serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/viewer.html", res);
                 res->end();
             }
             else {
                 auto playersInGameIter = playersInGame.find(id);
+
                 if(playersInGameIter != playersInGame.end()) {
                     auto * gameManager = playersInGameIter->second;
                     if(gameManager->gameID_ == gameID) {
-                        serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/js/player.js", res);
+
+                        auto closedConnectionsIter = closedConnections.find(id);
+
+                        if(closedConnectionsIter == closedConnections.end()) {
+                            res->end("You are already playing in this game. Close the previous window and refresh to play here.");
+                            return;
+                        }
+
+                        serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/player.html", res);
+                        res->end();
+                    }
+                    else {
+                        serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/watcher.html", res);
                         res->end();
                     }
                 }
                 else {
-                    serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/js/watcher.js", res);
+                    serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/watcher.html", res);
                     res->end();
                 }
             }
         }
         else {
             if(sGameID == "new") {
-                serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/js/player.js", res);
+                serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/player.html", res);
                 res->end();
             }
             else 
                 res->writeStatus("404 Bad Request")->writeHeader("Content-Type", "text/plain")->end("Invalid game requested");
         }
-
     });
-
 
     app.post("/login", [](auto * res, auto * req) { 
         std::shared_ptr<bool> aborted(new bool(false));
@@ -191,6 +270,27 @@ void initRoutes(uWS::SSLApp & app) {
         res->onData([res, aborted] (std::string_view body, bool isLast) {
             handleSignupOrLogin(aborted, res, body, false);
         });
+    });
+
+    app.get("/logout", [](auto *res, auto *req) {
+        auto cookies = parseCookies(req->getHeader("cookie"));
+        auto it = cookies.find("token");
+
+        if (it != cookies.end()) {
+            std::string token = it->second;
+
+            auto [id, username] = getUserNameIDFromToken(token);
+
+            if (id != -1) {
+                // Invalidate the cookie
+                res->writeHeader("Set-Cookie", "token=; Path=/; Max-Age=0")->end();
+            } else {
+                res->writeStatus("400 Bad Request")->end("Invalid token");
+            }
+            return;
+        }
+
+        res->writeStatus("400 Bad Request")->end("No token");
     });
 
 
@@ -290,7 +390,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/player/:username", [](auto * res, auto * req) {
+    app.get("/player-info/:username", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {
@@ -314,7 +414,7 @@ void initRoutes(uWS::SSLApp & app) {
         std::string sUserId(req->getParameter("user_id"));
 
         if(sUserId.length() > 0 && std::all_of(sUserId.begin(), sUserId.end(), ::isdigit))
-            res->writeHeader("Content-Type", "text/plain")->end(getLiveGameOfUser(stoi(sUserId)));
+            res->writeHeader("Content-Type", "json/application")->end(getLiveGameOfUser(stoi(sUserId)));
         else 
             res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Invalid user id to get live game");
     });

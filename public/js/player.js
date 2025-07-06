@@ -1,3 +1,5 @@
+// document.addEventListener("DOMContentLoaded", function () {
+    
     let board = null;
     let socket = null;
 
@@ -9,7 +11,7 @@
     let myName = "";
     let opponentName = "";
     let lastMove = "";
-    let promotionSquare = null;
+    let promotionMove = null;
     let sentTime = null;
     let RTT = null;
     let enpassantSquare = null;
@@ -123,6 +125,10 @@
                 let i = 7;
 
                 while(i < parts.length) {
+                    if(parts[i].length == 0) {
+                        i++;
+                    }
+
                     if(parts[i] == "time") {
                         i++;
                         break;
@@ -157,7 +163,7 @@
                 playerColor = parts[2];
                 whiteTime = parseInt(parts[3], 10);
                 blackTime = parseInt(parts[4], 10);
-                timeStamps = [whiteTime, blackTime];
+                timeStamps = [[whiteTime, blackTime]];
 
                 replaceRematchOptionsWithDrawOptions();
                 clearMoveHistory();
@@ -343,11 +349,11 @@
         const isWhite = piece && piece[0] === 'w';
         const direction = isWhite ? 1 : -1;
 
-        const isPromotionRank = (playerColor === 'w' && target[1] === '8') || (playerColor === 'b' && target[1] === '1');
+        const isPromotionRank = (playerColor === 'w' && source[1] === '7' && target[1] === '8') || (playerColor === 'b' && source[1] == '2' && target[1] === '1');
 
         if(isPawn && isPromotionRank) {
-            promotionSquare = {source, target};
-            showPromotionDialog();  
+            promotionMove = {source, target};
+            showPromotionDialog(currentTurn);  
             return;
         }
 
@@ -398,10 +404,12 @@
         else enpassantSquare = null;
     }
 
-    function showPromotionDialog(source, target) {
+    function showPromotionDialog(color) {
         console.log("Show promotion dialogue");
-        pendingPromotion = { source, target };
-        $('#promotionDialog').removeClass('hidden flex').addClass('flex');
+        if(color == "w")
+            $('#promotionDialogWhite').removeClass('hidden');
+        else 
+            $('#promotionDialogBlack').removeClass('hidden');
     }
 
     function changeTurn() {
@@ -454,53 +462,62 @@
         const actionsContainer = document.getElementById('game-actions');
         if (!actionsContainer) return;
 
-        actionsContainer.innerHTML = ''; // Clear existing buttons
+        // Clear existing buttons from the container
+        actionsContainer.innerHTML = '';
 
-        const createButton = (text, bgColor, hoverColor, handler) => {
+        /**
+         * Creates a button element with styles matching the original HTML.
+         * @param {string} id - The ID for the button.
+         * @param {string} text - The text content of the button.
+         * @param {string} bgColor - The Tailwind CSS class for the background color.
+         * @param {string} hoverColor - The Tailwind CSS class for the hover state background color.
+         * @param {function} handler - The function to execute on click.
+         * @returns {HTMLButtonElement}
+         */
+        const createButton = (id, text, bgColor, hoverColor, handler) => {
             const btn = document.createElement('button');
+            btn.id = id;
             btn.textContent = text;
-            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg hover:${hoverColor} transition duration-200`;
+            // Apply the exact same classes as the original HTML buttons
+            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg ${hoverColor}`;
             btn.onclick = handler;
             return btn;
         };
 
         const rematchBtn = createButton(
+            'rematch-btn',
             'Rematch',
             'bg-blue-600',
-            'bg-blue-700',
+            'hover:bg-blue-700',
             () => {
-                if(socket) {
+                if (socket) {
                     socket.send('req-rematch');
-                }
-                else {
-                    const para = `<p> Connection lost. Please start a new game <\p>`
-                    document.getElementById('game-actions').appendChild(para);
+                } else {
+                    const para = document.createElement('p');
+                    para.textContent = 'Connection lost. Please start a new game.';
+                    para.className = 'col-span-2 text-center text-sm';
+                    actionsContainer.appendChild(para);
                 }
             }
         );
 
         const newGameBtn = createButton(
+            'new-game-btn',
             'New Game',
             'bg-green-600',
-            'bg-green-700',
+            'hover:bg-green-700',
             () => {
-                if(socket) {
+                if (socket) {
                     socket.send('new-game');
-                }
-                else {
+                } else {
                     initWebSocket();
                 }
             }
         );
 
-        // Create a wrapper div for the grid layout
-        const gridWrapper = document.createElement('div');
-        gridWrapper.className = 'grid grid-cols-2 gap-3';
-
-        gridWrapper.appendChild(rematchBtn);
-        gridWrapper.appendChild(newGameBtn);
-
-        actionsContainer.appendChild(gridWrapper);
+        // Append new buttons directly to the grid container
+        actionsContainer.appendChild(rematchBtn);
+        actionsContainer.appendChild(newGameBtn);
     }
 
 
@@ -508,48 +525,56 @@
         const actionsContainer = document.getElementById('game-actions');
         if (!actionsContainer) return;
 
-        actionsContainer.innerHTML = ''; // Clear existing buttons
+        // Clear existing buttons from the container
+        actionsContainer.innerHTML = '';
 
-        const createButton = (text, bgColor, hoverColor, handler) => {
+        /**
+         * Creates a button element with styles matching the original HTML.
+         * @param {string} id - The ID for the button.
+         * @param {string} text - The text content of the button.
+         * @param {string} bgColor - The Tailwind CSS class for the background color.
+         * @param {string} hoverColor - The Tailwind CSS class for the hover state background color.
+         * @param {function} handler - The function to execute on click.
+         * @returns {HTMLButtonElement}
+         */
+        const createButton = (id, text, bgColor, hoverColor, handler) => {
             const btn = document.createElement('button');
+            btn.id = id;
             btn.textContent = text;
-            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg hover:${hoverColor} transition duration-200`;
+            // Apply the exact same classes as the original HTML buttons
+            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg ${hoverColor}`;
             btn.onclick = handler;
             return btn;
         };
 
         const drawBtn = createButton(
+            'draw-btn',
             'Offer Draw',
             'bg-blue-600',
-            'bg-blue-700',
+            'hover:bg-blue-700',
             () => {
-                if(socket) {
+                if (socket) {
                     socket.send('req-draw');
                 }
             }
         );
 
         const resignBtn = createButton(
+            'resign-btn',
             'Resign',
             'bg-red-600',
-            'bg-red-700',
+            'hover:bg-red-700',
             () => {
-                if(socket) {
+                if (socket) {
                     socket.send('resign');
                 }
             }
         );
 
-        // Create a wrapper div for the grid layout
-        const gridWrapper = document.createElement('div');
-        gridWrapper.className = 'grid grid-cols-2 gap-3';
-
-        gridWrapper.appendChild(drawBtn);
-        gridWrapper.appendChild(resignBtn);
-
-        actionsContainer.appendChild(gridWrapper);
+        // Append new buttons directly to the grid container
+        actionsContainer.appendChild(drawBtn);
+        actionsContainer.appendChild(resignBtn);
     }
-
 
     function handleGameResult(result, reason, whiteScore, blackScore) {
         if(reason === 'Timeout') {
@@ -610,12 +635,12 @@
         const topTimer = document.getElementById('top-timer');
 
         if(isBottomWhite) {
-            bottomTimer.textContent = whiteTime;
-            topTimer.textContent = blackTime;
+            bottomTimer.textContent = formatTime(whiteTime);
+            topTimer.textContent = formatTime(blackTime);
         }
         else {
-            bottomTimer.textContent = blackTime;
-            topTimer.textContent = whiteTime;
+            bottomTimer.textContent = formatTime(blackTime);
+            topTimer.textContent = formatTime(whiteTime);
         }
     }
 
@@ -693,90 +718,6 @@
         board.orientation(isBottomWhite ? 'white' : 'black');
     }
 
-    // Insert Game Actions dynamically
-    function insertGameActions(container) {
-        const actionsHTML = `
-            <div id="game-actions">
-                <div class="grid grid-cols-2 gap-3">
-                    <button id="draw-btn" class="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition duration-200">Offer Draw</button>
-                    <button id="resign-btn" class="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition duration-200">Resign</button>
-                </div>
-            </div>
-            <hr class="my-4">
-        `;
-        container.insertAdjacentHTML('beforeend', actionsHTML);
-    }
-
-    // Insert Chat dynamically
-    function insertChat(container, spectator = false) {
-        const chatTitle = spectator ? "Live Chat" : "Chat";
-        const chatHTML = `
-            <div id="chat-section" class="flex-grow flex flex-col">
-                <h3 class="text-2xl font-bold mb-2 text-center">${chatTitle}</h3>
-                <div id="chat-messages" class="chat-messages flex-grow border rounded-lg p-3 bg-gray-50 mb-3">
-                    <!-- Messages go here -->
-                </div>
-                <div class="flex">
-                    <input type="text" id="chat-input" class="flex-grow border rounded-l-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Type a message...">
-                    <button id="send-chat-btn" class="bg-blue-600 text-white px-4 rounded-r-lg hover:bg-blue-700 transition duration-200">Send</button>
-                </div>
-            </div>
-        `;
-        container.insertAdjacentHTML('beforeend', chatHTML);
-    }
-
-    // Insert modals dynamically
-    function insertModals() {
-        const modalsHTML = `
-            <!-- Draw Offer Modal -->
-            <div id="draw-offer-modal" class="modal-backdrop hidden">
-                <div class="modal-content">
-                    <h3 class="text-xl font-bold mb-4">Draw Offer Received</h3>
-                    <p class="mb-6">Your opponent has offered a draw.</p>
-                    <div class="flex justify-center space-x-4">
-                        <button id="accept-draw-btn" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Accept</button>
-                        <button id="reject-draw-btn" class="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Reject</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Rematch Offer Modal -->
-            <div id="rematch-offer-modal" class="modal-backdrop hidden">
-                <div class="modal-content">
-                    <h3 class="text-xl font-bold mb-4">Rematch Offer</h3>
-                    <p class="mb-6">Your opponent would like a rematch.</p>
-                    <div class="flex justify-center space-x-4">
-                        <button id="accept-rematch-btn" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">Accept</button>
-                        <button id="reject-rematch-btn" class="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Reject</button>
-                    </div>
-                </div>
-            </div>
-        `;
-        document.body.insertAdjacentHTML('beforeend', modalsHTML);
-    }
-
-    function insertPromotionDialog() {
-        const promotionDialogHTML = `
-            <div id="promotionDialog" class="fixed inset-0 bg-black bg-opacity-70 hidden items-center justify-center z-50">
-                <div class="bg-gray-800 p-6 rounded-xl text-white flex gap-4">
-                    <button data-piece="q" class="promotion-piece">♕</button>
-                    <button data-piece="r" class="promotion-piece">♖</button>
-                    <button data-piece="b" class="promotion-piece">♗</button>
-                    <button data-piece="n" class="promotion-piece">♘</button>
-                </div>
-            </div>
-        `;
-        document.body.insertAdjacentHTML('beforeend', promotionDialogHTML);
-    }
-
-    function insertOverlay() {
-        const overlayHTML = `
-            <div id="overlay"> You are being matched with an opponent... </div>
-        `;
-
-        document.body.insertAdjacentHTML('beforeend', overlayHTML);
-    }
-
 
     async function getUserStatus() {
         try {
@@ -845,13 +786,16 @@
             if (target) {
                 const moveIndex = parseInt(target.dataset.moveIndex, 10);
                 if (!isNaN(moveIndex) && moveIndex < moveHistory.length) {
-                    currentMoveIndex = moveIndex+1;
+                    currentMoveIndex = moveIndex;
+                    console.log(currentMoveIndex);
                     board.position(moveHistory[currentMoveIndex], false);
-                    updateTimersAt(currentMoveIndex);
+                    if(currentMoveIndex != moveHistory.length - 1) updateTimersAt(currentMoveIndex);
                     updateNavButtons();
                 }
             }
         });
+
+        document.getElementById('orientation-btn').addEventListener('click', changeOrientation);
 
         // Game Actions and Chat listeners remain the same...
         document.getElementById('draw-btn').addEventListener('click', () => socket.send('req-draw'));
@@ -875,14 +819,19 @@
     
         $('.promotion-piece').on('click', function () {
             const piece = $(this).data('piece');
-            let {source, target} = promotionSquare;
+            let {source, target} = promotionMove;
 
             lastMove = `${source}${target}${piece}`;
         
             console.log(`Sending move: move ${lastMove}`);
             socket.send(`move ${lastMove}`);
-        
-            $('#promotionDialog').addClass('hidden').removeClass('flex');
+            
+            if(currentTurn == "w")
+                $('#promotionDialogWhite').addClass('hidden');
+            else 
+                $('#promotionDialogBlack').addClass('hidden');
+
+            promotionMove = null;
         });
     }
 
@@ -904,8 +853,6 @@
         };
         board = Chessboard('board', config);        
 
-        showOverlay('');
-
         await getUserStatus();
         initWebSocket();
         setupEventListeners();
@@ -914,18 +861,20 @@
     }
 
     // --- Mounting Locations ---
-    const rightPanel = document.querySelector('.bg-white.p-4.rounded-lg.shadow-lg.flex.flex-col');
-    if (rightPanel) {
-        insertGameActions(rightPanel);
-        insertChat(rightPanel, /* set true for live chat */ false);
-    }
+    // const rightPanel = document.querySelector('.bg-white.p-4.rounded-lg.shadow-lg.flex.flex-col');
+    // if (rightPanel) {
+    //     insertGameActions(rightPanel);
+    //     insertChat(rightPanel, /* set true for live chat */ false);
+    // }
 
     // Draw and Rematch Modals
-    insertModals();
+    // insertModals();
 
-    insertPromotionDialog();
+    // insertPromotionDialog();
 
-    insertOverlay();
+    // insertOverlay();
 
     // Start the application
     init();
+
+// });

@@ -290,6 +290,15 @@ void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view
     if(whiteData_->ws_) whiteData_->ws_->send(toSend, uWS::OpCode::TEXT);
     if(blackData_->ws_) blackData_->ws_->send(toSend, uWS::OpCode::TEXT);
 
+    json publishResultJson;
+    publishResultJson["type"] = "result";
+    publishResultJson["result"] = (isDraw ? "d" : (whiteWon ? "w" : "b"));
+    publishResultJson["reason"] = reason;
+    publishResultJson["whiteScore"] = whiteScore_;
+    publishResultJson["blackScore"] = blackScore_;
+
+    whiteData_->ws_->publish(sGameID_, publishResultJson.dump(), uWS::OpCode::TEXT);
+
     gameResultDBHandler(dbReason, isDraw, whiteWon, moveHistory, timeStamps);    
 }
 
@@ -410,15 +419,19 @@ void GameManager::resetData() {
     blackData_->chess_ = whiteData_->chess_ = std::make_shared<LC::LegalChess>();
     whiteData_->askedRematch_ = whiteData_->inGame_ = whiteData_->isWhite_ = whiteData_->offeredDraw_ = false;
     blackData_->askedRematch_ = blackData_->inGame_ = blackData_->isWhite_ = blackData_->offeredDraw_ = false;
-    timeStamps_ = "";
+    timeStamps_ = "300-300 ";
 }
 
-GameManagerPointer::GameManagerPointer() : pointer(nullptr) {}
+GameManagerPointer::GameManagerPointer() : pointer(nullptr), topic("") {}
 
-GameManagerPointer::GameManagerPointer(GameManager* p) : pointer(p) {}
+GameManagerPointer::GameManagerPointer(GameManager* p, std::string sTopic) : pointer(p), topic(sTopic) {}
 
 GameManagerPointer::GameManagerPointer(GameManagerPointer&& other) {
+    std::cout << "move Constructor gp\n";
+    
     pointer = other.pointer;
+    topic = other.topic;
 
     other.pointer = nullptr;
+    other.topic = "";
 }

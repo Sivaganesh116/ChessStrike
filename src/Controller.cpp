@@ -175,6 +175,9 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
         newPlayerData->ws_->send(toNewPlayer.str(), uWS::OpCode::TEXT);
         waitingPlayer->ws_->send(toWaitingPlayer.str(), uWS::OpCode::TEXT);
 
+        newPlayerData->ws_->subscribe(std::to_string(gameID));
+        waitingPlayer->ws_->subscribe(std::to_string(gameID));
+
         playersInGame.insert({waitingPlayer->id_, waitingPlayer->gameManager_.get()});
         playersInGame.insert({newPlayerData->id_, newPlayerData->gameManager_.get()});
 
@@ -349,7 +352,17 @@ void gameMoveHandler(uWS::WebSocket<true, true, PlayerData>* ws, PlayerData* mov
     otherData->moveTimer_->start();
 
     ws->send("move true " + swsec + " " + swnsec + " " + sbsec + " " + sbnsec, uWS::OpCode::TEXT);
-    ws->publish(movedPlayerData->gameManager_->sGameID_, "newmove " + move + " " + swsec + " " + swnsec + " " + sbsec + " " + sbnsec, uWS::OpCode::TEXT);
+
+    json publishJson;
+    publishJson["type"] = "newmove";
+    publishJson["move"] = move;
+    publishJson["whiteSec"] = std::to_string(wsec);
+    publishJson["whiteNanoSec"] = std::to_string(wnsec);
+    publishJson["blackSec"] = std::to_string(bsec);
+    publishJson["blackNanoSec"] = std::to_string(bnsec);
+    
+
+    ws->publish(movedPlayerData->gameManager_->sGameID_, publishJson.dump(), uWS::OpCode::TEXT);
 
     movedPlayerData->gameManager_->timeStamps_ += swsec + "-" + sbsec + " ";
 
@@ -430,30 +443,30 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 
         txn.commit();
 
-        p1->gameManager_->gameID_ = txnResult[0][0].as<int>();
-        p1->gameManager_->sGameID_ = std::to_string(p1->gameManager_->gameID_);
+        std::string sNewGameID = txnResult[0][0].as<std::string>();
+
 
         std::stringstream toP1;
-        toP1 << "start-rematch" << " " << p1->gameManager_->sGameID_ << " " << (p1->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
+        toP1 << "start-rematch" << " " << sNewGameID << " " << (p1->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
 
         std::stringstream toP2;
-        toP2 << "start-rematch" << " " << p1->gameManager_->sGameID_ << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
+        toP2 << "start-rematch" << " " << sNewGameID << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
 
         std::cout << "player's re-matched" << std::endl;
 
         p1->ws_->send(toP1.str(), uWS::OpCode::TEXT);
         p2->ws_->send(toP2.str(), uWS::OpCode::TEXT);
 
-
         // It is assumed that all the relvant data of both players and game is reset
 
-        // publish rematch to subscribers/watchers
+        // publish to old topic about rematch to subscribers/watchers
+        json rematchJson;
+        rematchJson["type"] = "rematch";
+        rematchJson["newGameID"] = sNewGameID;
+        p1->ws_->publish(p1->gameManager_->sGameID_, rematchJson.dump(), uWS::OpCode::TEXT);
 
-        std::stringstream toSubs;
-        toP2 << "start-rematch" << " " << p1->gameManager_->sGameID_ << " " << p1->name_ << " " << (p1->isWhite_ ? "w" : "b") << " " << p2->name_ << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
-        
-        // To-do : change topic to player'ids
-        p1->ws_->publish(p1->gameManager_->sGameID_, toSubs.str(), uWS::OpCode::TEXT);
+        p1->gameManager_->gameID_ = stoi(sNewGameID);
+        p1->gameManager_->sGameID_ = sNewGameID;
 
         if(p1->isWhite_) {
             p1->gameManager_->whiteData_ = p1;
@@ -469,7 +482,7 @@ void rematch(PlayerData* p1, PlayerData* p2) {
         playersInGame.insert({p1->id_, p1->gameManager_.get()});
         playersInGame.insert({p2->id_, p2->gameManager_.get()});
 
-        liveGames.insert({txnResult[0][0].as<int>(), p1->gameManager_.get()});
+        liveGames.insert({stoi(sNewGameID), p1->gameManager_.get()});
         
         // we are using a per move time sync, no need for a repeat timer to send time updates for now
 
@@ -743,6 +756,7 @@ void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, s
     auto * oldData = ws->getUserData();
 
     if(!oldData->inGame_) {
+        std::cout << "Not in game, so setting nullptr in game manager\n";
         if(oldData->isWhite_) oldData->gameManager_->whiteData_ = nullptr;
         else oldData->gameManager_->blackData_ = nullptr;
 
@@ -861,7 +875,7 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
         pqxx::work txn{*connHandle->get()};
 
         try {
-            pqxx::result allGames = txn.exec(pqxx::zview("SELECT game_id from user_to_game WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT $3"), pqxx::params(userID, batchNumber*20, numGames));
+            pqxx::result allGames = txn.exec(pqxx::zview("SELECT game_id from user_to_game WHERE user_id = $1 ORDER BY id DESC OFFSET $2 LIMIT $3"), pqxx::params(userID, batchNumber*20, numGames + 1));
 
             json gamesJson;
             gamesJson["games"] = json::array();
@@ -871,10 +885,11 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
                 gameIDs.append(row[0].as<int>());
             }
 
+            gamesJson["moreGames"] = gameIDs.size() > numGames;
             
             if(gameIDs.size()) {
                 std::ostringstream query;
-                query << "SELECT white_name, black_name, result, reason, created_at FROM game WHERE id IN (";
+                query << "SELECT id, white_name, black_name, result, reason, created_at FROM game WHERE id IN (";
                 for (size_t i = 0; i < gameIDs.size(); ++i) {
                     if (i != 0) query << ", ";
                     query << "$" << (i + 1);
@@ -885,11 +900,12 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
 
                 json gameJson;
                 for(auto game : gamesResult) {
-                    gameJson["white"] = game[0].as<std::string>();
-                    gameJson["black"] = game[1].as<std::string>();
-                    gameJson["result"] = game[2].as<std::string>();
-                    gameJson["reason"] = game[3].as<std::string>();
-                    gameJson["created_at"] = game[4].as<std::string>();
+                    gameJson["id"] = game[0].as<std::string>();
+                    gameJson["white"] = game[1].as<std::string>();
+                    gameJson["black"] = game[2].as<std::string>();
+                    gameJson["result"] = game[3].as<std::string>();
+                    gameJson["reason"] = game[4].as<std::string>();
+                    gameJson["created_at"] = game[5].as<std::string>();
 
                     gamesJson["games"].push_back(gameJson);
                 }
@@ -901,7 +917,7 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
             else {
                 if(!*aborted) {
                     res->writeHeader("Content-Type", "json/application");
-                    res->end("{}");
+                    res->end("{games: {}}");
                 }
             }
         } catch(std::exception& e) {
@@ -974,8 +990,8 @@ void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* re
                 gamesList += sGameID;
                 gamesList.push_back(',');
 
-                if(row[1].as<std::string>() == "won") numWon++;
-                else if(row[1].as<std::string>() == "lost") numLost++;
+                if(row[1].as<std::string>() == "w") numWon++;
+                else if(row[1].as<std::string>() == "l") numLost++;
             }
             gamesList.pop_back();
 
@@ -1014,13 +1030,18 @@ void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* re
 }
 
 std::string getLiveGameOfUser(int userID) {
+    json liveJson;
     auto it = playersInGame.find(userID);
 
     if(it == playersInGame.end()) {
-        return "-";
+        liveJson["isPlaying"] = false;
+        return liveJson.dump();
     }
 
-    return it->second->sGameID_;
+    liveJson["isPlaying"] = true;
+    liveJson["gameID"] = it->second->sGameID_;
+
+    return liveJson.dump();
 }
 
 
@@ -1084,23 +1105,29 @@ void watchWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req
     // get the topic
     std::string topic(req->getQuery("topic"));
     if(topic.length() == 0 || !std::all_of(topic.begin(), topic.end(), ::isdigit)) {
-        auto it = liveGames.find(stoi(topic));
-
-        if(it == liveGames.end()) {
-            res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("No such game to receive updates");
-            return;
-        }
-        else gamePointer = it->second;
+        res->writeStatus("400 Bad Request")->writeHeader("Content-Type", "text/plain")->end("Invalid topic provided.");
+        return;
     }
+    
+    auto it = liveGames.find(stoi(topic));
 
+    if(it == liveGames.end()) {
+        res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("No such game to receive updates");
+        return;
+    }
+    
+    gamePointer = it->second;
+    
     /* If we have this header set, it's a websocket */
     std::string_view secWebSocketKey = req->getHeader("sec-websocket-key");
     if (secWebSocketKey.length() == 24) {
         std::string_view secWebSocketProtocol = req->getHeader("sec-websocket-protocol");
         std::string_view secWebSocketExtensions = req->getHeader("sec-websocket-extensions");
 
+        GameManagerPointer gameMngrPointer(gamePointer, gamePointer->sGameID_);
+
         if(!connectionAborted) 
-            res->template upgrade<GameManagerPointer>(GameManagerPointer(gamePointer), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
+            res->template upgrade<GameManagerPointer>(std::move(gameMngrPointer), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
         else std::cout << "Connection Aborted before upgrade\n";
     }
     else {

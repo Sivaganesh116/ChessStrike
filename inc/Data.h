@@ -89,6 +89,7 @@ public:
     void randGameResultHandler(bool isDraw, bool whiteWon, std::string reason);
     void startSyncTimer();
     void stopSyncTimer();
+    void resetData();
 
     int gameID_;
     std::string sGameID_;
@@ -101,7 +102,6 @@ public:
 private:
     void destroySyncTimer();
     void gameResultDBHandler(std::string dbReason, bool isDraw, bool whiteWon, std::string moveHistory, std::string timeStamps);
-    void resetData();
 };
 
 struct GameManagerPointer {

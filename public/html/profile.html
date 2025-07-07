@@ -6,61 +6,69 @@
   <title>Chess Player Profile</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="min-h-screen flex flex-col items-center justify-start py-10 px-4">
-  <div class="max-w-4xl w-full bg-gray-800 p-6 rounded-xl shadow-2xl">
-    <h1 id="player-name" class="text-3xl font-bold mb-6 text-center">Chess Player Profile</h1>
+<body class="min-h-screen bg-gray-900">
+  <!-- Navbar -->
+  <nav class="w-full bg-gray-800 p-4 flex justify-between items-center shadow">
+    <a href="/" class="text-2xl font-bold text-white">Chess Strike</a>
+    <div id="auth-area" class="flex gap-4 relative"></div>
+  </nav>
 
-    <!-- Stats -->
-    <div class="grid grid-cols-2 sm:grid-cols-3 gap-6 mb-8 text-center">
-      <div class="bg-gray-700 p-4 rounded-lg shadow">
-        <h2 class="text-xl font-semibold">Games Played</h2>
-        <p id="total-games" class="text-2xl mt-2">0</p>
+  <main class="min-h-screen flex flex-col items-center justify-start py-10 px-4">
+    <div class="max-w-4xl w-full bg-gray-800 p-6 rounded-xl shadow-2xl">
+      <h1 id="player-name" class="text-3xl font-bold mb-6 text-center">Chess Player Profile</h1>
+
+      <!-- Stats -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-6 mb-8 text-center">
+        <div class="bg-gray-700 p-4 rounded-lg shadow">
+          <h2 class="text-xl font-semibold">Games Played</h2>
+          <p id="total-games" class="text-2xl mt-2">0</p>
+        </div>
+        <div class="bg-green-700 p-4 rounded-lg shadow">
+          <h2 class="text-xl font-semibold">Wins</h2>
+          <p id="wins" class="text-2xl mt-2">0</p>
+        </div>
+        <div class="bg-red-700 p-4 rounded-lg shadow">
+          <h2 class="text-xl font-semibold">Losses</h2>
+          <p id="losses" class="text-2xl mt-2">0</p>
+        </div>
+        <div class="bg-yellow-600 p-4 rounded-lg shadow">
+          <h2 class="text-xl font-semibold">Draws</h2>
+          <p id="draws" class="text-2xl mt-2">0</p>
+        </div>
+        <div class="bg-green-700 p-4 rounded-lg text-center shadow">
+          <h2 class="text-xl font-semibold">Win Percentage</h2>
+          <p id="win-percentage" class="text-2xl mt-2 text-white">0%</p>
+        </div>
+        <div class="bg-gray-700 p-4 rounded-lg text-center shadow">
+          <h2 class="text-xl font-semibold">Joined On</h2>
+          <p id="joined-on" class="text-2xl mt-2 text-white">0%</p>
+        </div>
+        <div class="col-span-2 sm:col-span-3 flex justify-center mt-4">
+          <button id="watch-btn" class="bg-blue-600 px-6 py-2 text-lg font-semibold rounded-lg shadow hover:bg-blue-500 transition disabled:opacity-40" disabled>Watch Game</button>
+        </div>
       </div>
-      <div class="bg-green-700 p-4 rounded-lg shadow">
-        <h2 class="text-xl font-semibold">Wins</h2>
-        <p id="wins" class="text-2xl mt-2">0</p>
-      </div>
-      <div class="bg-red-700 p-4 rounded-lg shadow">
-        <h2 class="text-xl font-semibold">Losses</h2>
-        <p id="losses" class="text-2xl mt-2">0</p>
-      </div>
-      <div class="bg-yellow-600 p-4 rounded-lg shadow">
-        <h2 class="text-xl font-semibold">Draws</h2>
-        <p id="draws" class="text-2xl mt-2">0</p>
-      </div>
-      <div class="bg-green-700 p-4 rounded-lg text-center shadow">
-        <h2 class="text-xl font-semibold">Win Percentage</h2>
-        <p id="win-percentage" class="text-2xl mt-2 text-white">0%</p>
-      </div>
-      <div class="bg-gray-700 p-4 rounded-lg text-center shadow">
-        <h2 class="text-xl font-semibold">Joined On</h2>
-        <p id="joined-on" class="text-2xl mt-2 text-white">0%</p>
-      </div>
-      <div class="col-span-2 sm:col-span-3 flex justify-center mt-4">
-        <button id="watch-btn" class="bg-blue-600 px-6 py-2 text-lg font-semibold rounded-lg shadow hover:bg-blue-500 transition disabled:opacity-40" disabled>Watch Game</button>
+
+      <!-- Game History -->
+      <div>
+        <h2 class="text-2xl font-bold mb-4">Game History</h2>
+        <div class="overflow-x-auto">
+          <table class="min-w-full bg-gray-700 rounded-lg overflow-hidden">
+            <thead>
+              <tr class="bg-gray-600 text-left text-sm uppercase text-gray-300">
+                <th class="p-4">Game</th>
+                <th class="p-4">Result</th>
+                <th class="p-4">Reason</th>
+                <th class="p-4">Date</th>
+              </tr>
+            </thead>
+            <tbody id="game-history" class="text-sm divide-y divide-gray-600">
+              <!-- Game rows will go here -->
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
-
-    <!-- Game History -->
-    <div>
-      <h2 class="text-2xl font-bold mb-4">Game History</h2>
-      <div class="overflow-x-auto">
-        <table class="min-w-full bg-gray-700 rounded-lg overflow-hidden">
-          <thead>
-            <tr class="bg-gray-600 text-left text-sm uppercase text-gray-300">
-              <th class="p-4">Game</th>
-              <th class="p-4">Result</th>
-              <th class="p-4">Reason</th>
-              <th class="p-4">Date</th>
-            </tr>
-          </thead>
-          <tbody id="game-history" class="text-sm divide-y divide-gray-600">
-            <!-- Game rows will go here -->
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
+  </main>
 
   <div id="overlay"> You are being matched with an opponent... </div>
 
@@ -81,6 +89,7 @@
 
     let playerId = null;
     let playerName = null;
+    let myName = null;
 
     const charToReason = {
         r: "Repitition",
@@ -92,6 +101,60 @@
         A: "Abandonment",
         R: "Resignation"
     };
+
+    async function getUserStatus() {
+      try {
+        const response = await fetch('/api/user/status', {
+            method: 'GET',
+            credentials: 'include'
+        });
+
+        if(!response.ok) {
+            throw new Error(`HTTP error! User Status: ' ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if(data.loggedIn === true) {
+            myName = data.username;
+
+            console.log(`Username: ${myName}`);
+
+            const authArea = document.getElementById('auth-area');
+                authArea.innerHTML = `
+                <button id="burger" class="text-white focus:outline-none">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                </button>
+                <div id="dropdown" class="hidden absolute right-0 mt-2 w-40 bg-gray-800 rounded shadow-md z-50">
+                    <a href="/player/${myName}" class="block px-4 py-2 hover:bg-gray-700">Profile</a>
+                    <a id="logout-btn" href="/logout" class="block px-4 py-2 hover:bg-gray-700">Logout</a>
+                </div>
+            `;
+
+            document.getElementById('burger').onclick = () => {
+                document.getElementById('dropdown').classList.toggle('hidden');
+            };
+
+            document.getElementById('logout-btn').onclick = async (e) => {
+                e.preventDefault();
+                const res = await fetch('/logout');
+                if (res.ok) {
+                    window.location.href = "/";
+                }
+            };
+        }  
+        else {
+            console.log("User is not logged in");
+
+            authArea.innerHTML = `
+                <button onclick="showLoginModal()" class="bg-blue-700 px-4 py-2 rounded hover:bg-blue-600">Login</button>
+                <button onclick="showSignupModal()" class="bg-green-700 px-4 py-2 rounded hover:bg-green-600">Signup</button>
+            `;
+        }  
+      } catch (error) {
+          console.error("User Status Error: ", error);
+      }
+    }
 
     async function fetchPlayerInfo() {
       try {
@@ -207,12 +270,82 @@
         }
     }
 
+    function showLoginModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Log In</h2>
+                <input id="login-username" type="text" placeholder="Username" class="w-full mb-3 px-3 py-2 bg-gray-700 rounded">
+                <input id="login-password" type="password" placeholder="Password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-500 py-2 rounded">Log In</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function showSignupModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div id="signup-step1" class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Sign Up - Step 1</h2>
+                <input id="signup-username" type="text" placeholder="Choose a username" class="w-full mb-2 px-3 py-2 bg-gray-700 rounded">
+                <p id="username-error" class="text-red-400 text-sm mb-3 hidden">Username already exists. Try a different one.</p>
+                <button onclick="checkUsername()" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Next</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function checkUsername() {
+        const username = document.getElementById("signup-username").value;
+        fetch(`/username/unique?username=${encodeURIComponent(username)}`)
+            .then(res => res.json())
+            .then(isUnique => {
+                if (isUnique) {
+                    document.getElementById("signup-step1").innerHTML = `
+                    <h2 class="text-xl font-semibold mb-4">Sign Up - Step 2</h2>
+                    <input id="signup-password" type="password" placeholder="Choose a password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                    <button onclick="handleSignup('${username}')" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Sign Up</button>
+                    <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+                    `;
+                } else {
+                    document.getElementById("username-error").classList.remove("hidden");
+                }
+            });
+    }
+
+    function handleLogin() {
+        const username = document.getElementById("login-username").value;
+        const password = document.getElementById("login-password").value;
+        fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(()=> {
+            location.reload();
+        });
+    }
+
+    function handleSignup(username) {
+        const password = document.getElementById("signup-password").value;
+        fetch("/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(() => window.location.reload());
+    }
+
+    function closeModal() {
+        document.getElementById("modal-area").innerHTML = "";
+    }
 
     // Load on page
     fetchPlayerInfo().then(() => {
       updateWatchStatus();
       setInterval(updateWatchStatus, 2000);
     });
+
+    getUserStatus();
 
   </script>
 </body>

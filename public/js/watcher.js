@@ -19,7 +19,7 @@ document.addEventListener("DOMContentLoaded", function () {
     let gameID = "";
     let whiteName = "";
     let blackName = "";
-    let myName = "Watcher"
+    let myName = null;
     let promotionSquare = null;
     let enpassantSquare = null;
     let isBottomWhite = true;
@@ -34,11 +34,16 @@ document.addEventListener("DOMContentLoaded", function () {
     let whiteTime = 0;
     let blackTime = 0;
 
+    let lastHighlighted = [];
+    let lastHighlightedMoveCell = null;
+
     // --- DOM Elements ---
     const movesTbody = document.getElementById('moves-tbody');
     const prevBtn = document.getElementById('prev-btn');
     const nextBtn = document.getElementById('next-btn');
     const gameOverModal = document.getElementById('game-over-modal');
+    const chatInput = document.getElementById('chat-input');
+    const sendChatBtn = document.getElementById('send-chat-btn');
 
     // --- WebSocket Logic ---
     function initWebSocket() {
@@ -209,10 +214,19 @@ document.addEventListener("DOMContentLoaded", function () {
         // Check piece color against whose turn it is
         const pieceColor = piece.charAt(0);
         if (pieceColor !== tinkerTurn) return false;
+
+        // disable scroll
+        document.body.style.overflow = 'hidden';
     }
 
     function onDrop(source, target) {
+        // enable scroll
+        document.body.style.overflow = '';
+
         if(source == target || target == 'offBoard') return;
+
+        // enagle scroll
+        document.body.style.overflow = '';
         
         tinkerTurn = (tinkerTurn == 'w' ? 'b' : 'w');
     }
@@ -285,6 +299,8 @@ document.addEventListener("DOMContentLoaded", function () {
         }
         movesTbody.parentElement.scrollTop = movesTbody.parentElement.scrollHeight;
         updateNavButtons();
+        highlightMove(move.substring(0,2), move.substring(2, 4));
+        highlightMoveNotation(currentMoveIndex);
     }
 
 
@@ -445,6 +461,39 @@ document.addEventListener("DOMContentLoaded", function () {
         board.orientation(isBottomWhite ? 'white' : 'black');
     }
 
+    function clearHighlightedSquares() {
+        lastHighlighted.forEach(square => {
+            const el = document.querySelector(`.square-${square}`);
+            if (el) el.classList.remove('highlight-from', 'highlight-to');
+        });
+        lastHighlighted = [];
+    }
+
+    function highlightMove(from, to) {
+        clearHighlightedSquares();
+        console.log(from, to);
+        const fromEl = document.querySelector(`.square-${from}`);
+        const toEl = document.querySelector(`.square-${to}`);
+        if (fromEl) fromEl.classList.add('highlight-from');
+        if (toEl) toEl.classList.add('highlight-to');
+        lastHighlighted = [from, to];
+    }
+
+
+    function highlightMoveNotation(moveIndex) {
+        // Clear previous
+        if (lastHighlightedMoveCell) {
+            lastHighlightedMoveCell.classList.remove('highlight-move');
+        }
+
+        // Find the cell with the current move index
+        const moveCell = movesTbody.querySelector(`[data-move-index="${moveIndex}"]`);
+        if (moveCell) {
+            moveCell.classList.add('highlight-move');
+            lastHighlightedMoveCell = moveCell;
+        }
+    }
+
 
     function insertOverlay() {
         const overlayHTML = `
@@ -454,7 +503,6 @@ document.addEventListener("DOMContentLoaded", function () {
         document.body.insertAdjacentHTML('beforeend', overlayHTML);
     }
 
-    // No need for this func in watcher
     async function getUserStatus() {
         try {
             const response = await fetch('/api/user/status', {
@@ -472,11 +520,41 @@ document.addEventListener("DOMContentLoaded", function () {
                 myName = data.username;
 
                 console.log(`Username: ${myName}`);
+
+                const authArea = document.getElementById('auth-area');
+                    authArea.innerHTML = `
+                    <button id="burger" class="text-white focus:outline-none">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                    </button>
+                    <div id="dropdown" class="hidden absolute right-0 mt-2 w-40 bg-gray-800 rounded shadow-md z-50">
+                        <a href="/player/${myName}" class="block px-4 py-2 hover:bg-gray-700">Profile</a>
+                        <a id="logout-btn" href="/logout" class="block px-4 py-2 hover:bg-gray-700">Logout</a>
+                    </div>
+                `;
+
+                document.getElementById('burger').onclick = () => {
+                    document.getElementById('dropdown').classList.toggle('hidden');
+                };
+
+                document.getElementById('logout-btn').onclick = async (e) => {
+                    e.preventDefault();
+                    const res = await fetch('/logout');
+                    if (res.ok) {
+                        window.location.href = "/";
+                    }
+                };
             }  
             else {
                 console.log("User is not logged in");
-            }          
+                chatInput.disabled = true;
+                sendChatBtn.disabled = true;
+                chatInput.placeholder = "Please log in to participate in chat";
 
+                authArea.innerHTML = `
+                    <button onclick="showLoginModal()" class="bg-blue-700 px-4 py-2 rounded hover:bg-blue-600">Login</button>
+                    <button onclick="showSignupModal()" class="bg-green-700 px-4 py-2 rounded hover:bg-green-600">Signup</button>
+                `;
+            }  
         } catch (error) {
             console.error("User Status Error: ", error);
         }
@@ -503,6 +581,10 @@ document.addEventListener("DOMContentLoaded", function () {
                 board.position(moveHistory[currentMoveIndex], false); // No animation
                 updateTimersAt(currentMoveIndex);
                 updateNavButtons();
+                if(currentMoveIndex === 0) return;
+                const move = document.querySelector(`[data-move-index="${currentMoveIndex}"]`).innerText;
+                highlightMove(move.substring(0,2), move.substring(2, 4));
+                highlightMoveNotation(currentMoveIndex);
             }
         });
 
@@ -512,6 +594,9 @@ document.addEventListener("DOMContentLoaded", function () {
                 board.position(moveHistory[currentMoveIndex], false); // No animation
                 updateTimersAt(currentMoveIndex);
                 updateNavButtons();
+                const move = document.querySelector(`[data-move-index="${currentMoveIndex}"]`).innerText;
+                highlightMove(move.substring(0,2), move.substring(2, 4));
+                highlightMoveNotation(currentMoveIndex);
             }
         });
 
@@ -522,8 +607,10 @@ document.addEventListener("DOMContentLoaded", function () {
                 if (!isNaN(moveIndex) && moveIndex < moveHistory.length) {
                     currentMoveIndex = moveIndex;
                     board.position(moveHistory[currentMoveIndex], false);
-                    if(currentMoveIndex != moveHistory.length - 1)updateTimersAt(currentMoveIndex);
+                    if(currentMoveIndex != moveHistory.length - 1) updateTimersAt(currentMoveIndex);
                     updateNavButtons();
+                    highlightMove(target.innerText.substring(0,2), target.innerText.substring(2, 4));
+                    highlightMoveNotation(currentMoveIndex);
                 }
             }
         });
@@ -531,7 +618,9 @@ document.addEventListener("DOMContentLoaded", function () {
         document.getElementById('orientation-btn').addEventListener('click', changeOrientation);
 
     
-        document.getElementById('send-chat-btn').addEventListener('click', () => {
+        sendChatBtn.addEventListener('click', () => {
+            if(!myName) return;
+
             const input = document.getElementById('chat-input');
             if (input.value) {
                 let chatJson = {
@@ -545,11 +634,80 @@ document.addEventListener("DOMContentLoaded", function () {
                 input.value = '';
             }
         });
-        document.getElementById('chat-input').addEventListener('keypress', (e) => {
+        chatInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') document.getElementById('send-chat-btn').click();
         });
         
         document.getElementById('close-game-over-btn').addEventListener('click', () => gameOverModal.classList.add('hidden'));
+    }
+
+    function showLoginModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Log In</h2>
+                <input id="login-username" type="text" placeholder="Username" class="w-full mb-3 px-3 py-2 bg-gray-700 rounded">
+                <input id="login-password" type="password" placeholder="Password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-500 py-2 rounded">Log In</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function showSignupModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div id="signup-step1" class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Sign Up - Step 1</h2>
+                <input id="signup-username" type="text" placeholder="Choose a username" class="w-full mb-2 px-3 py-2 bg-gray-700 rounded">
+                <p id="username-error" class="text-red-400 text-sm mb-3 hidden">Username already exists. Try a different one.</p>
+                <button onclick="checkUsername()" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Next</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function checkUsername() {
+        const username = document.getElementById("signup-username").value;
+        fetch(`/username/unique?username=${encodeURIComponent(username)}`)
+            .then(res => res.json())
+            .then(isUnique => {
+                if (isUnique) {
+                    document.getElementById("signup-step1").innerHTML = `
+                    <h2 class="text-xl font-semibold mb-4">Sign Up - Step 2</h2>
+                    <input id="signup-password" type="password" placeholder="Choose a password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                    <button onclick="handleSignup('${username}')" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Sign Up</button>
+                    <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+                    `;
+                } else {
+                    document.getElementById("username-error").classList.remove("hidden");
+                }
+            });
+    }
+
+    function handleLogin() {
+        const username = document.getElementById("login-username").value;
+        const password = document.getElementById("login-password").value;
+        fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(()=> {
+            location.reload();
+        });
+    }
+
+    function handleSignup(username) {
+        const password = document.getElementById("signup-password").value;
+        fetch("/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(() => window.location.reload());
+    }
+
+    function closeModal() {
+        document.getElementById("modal-area").innerHTML = "";
     }
 
     // --- Initialization ---

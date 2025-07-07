@@ -540,6 +540,14 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
 
         movedPlayerData->gameManager_->gameResultHandler(false, movedPlayerData->isWhite_ == false, "Resignation", "R");
     }
+    else if(msgType == "abort") {
+        if(!movedPlayerData->inGame_ || movedPlayerData->chess_->getMoveHistory().length() > 11) return;
+
+        std::string sendAbort = "result a a " + std::to_string(movedPlayerData->gameManager_->whiteScore_) + " " + std::to_string(movedPlayerData->gameManager_->blackScore_);
+        ws->send(sendAbort, uWS::OpCode::TEXT);
+        if(movedPlayerData->otherWS_) movedPlayerData->otherWS_->send(sendAbort, uWS::OpCode::TEXT);
+        movedPlayerData->gameManager_->resetData();
+    }
     // "req-" and "res-" comes to server from users
     else if(msgType == "req-rematch") {
         if(movedPlayerData->inGame_) return;
@@ -615,6 +623,8 @@ void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerData> * ws) {
         std::stringstream reconnectData;
         reconnectData << "reconnection" << " " << newData->gameManager_->sGameID_ << " " << (newData->isWhite_ ? "w" : "b") << " " << (newData->isWhite_ ? newData->gameManager_->blackData_->name_ : newData->gameManager_->whiteData_->name_) << " " << std::to_string(wsec) << " " << std::to_string(bsec) << " " << (newData->isMyTurn_ ? (newData->isWhite_ ? "w" : "b") : (newData->isWhite_ ? "b" : "w")) << " " << newData->chess_->getMoveHistory() << " " << "time " << newData->gameManager_->timeStamps_;
         ws->send(reconnectData.str(), uWS::OpCode::TEXT);
+
+        if(newData->otherWS_) newData->otherWS_->send("opp-back", uWS::OpCode::TEXT);
         
         return;
     }
@@ -782,6 +792,7 @@ void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, s
     closedConnections.insert({playerData->id_, playerData});
 
     playerData->startAbandonTimer();
+    if(playerData->otherWS_) playerData->otherWS_->send("opp-left", uWS::OpCode::TEXT);
 
     std::cout << "Connection Closed: " << playerData->name_ << '\n';
 } 
@@ -910,13 +921,13 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
                     gamesJson["games"].push_back(gameJson);
                 }
                 if(!*aborted) {
-                    res->writeHeader("Content-Type", "json/application");
+                    res->writeHeader("Content-Type", "application/json");
                     res->end(gamesJson.dump());
                 }
             }
             else {
                 if(!*aborted) {
-                    res->writeHeader("Content-Type", "json/application");
+                    res->writeHeader("Content-Type", "application/json");
                     res->end("{games: {}}");
                 }
             }

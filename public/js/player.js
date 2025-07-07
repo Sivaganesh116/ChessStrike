@@ -1,5 +1,9 @@
 // document.addEventListener("DOMContentLoaded", function () {
     
+    let myLeftTimer = null;
+    let oppLeftTimer = null;
+    let myLeftTime = null;
+    let oppLeftTime = null;
     let board = null;
     let socket = null;
 
@@ -27,6 +31,11 @@
     let whiteTime = 0;
     let blackTime = 0;
 
+    let oppAbortEle = document.getElementById('top-auto-msg');
+    let lastHighlighted = [];
+    let lastHighlightedMoveCell = null;
+
+
     // --- DOM Elements ---
     const movesTbody = document.getElementById('moves-tbody');
     const prevBtn = document.getElementById('prev-btn');
@@ -37,7 +46,7 @@
 
     // --- WebSocket Logic ---
     function initWebSocket() {
-        socket = new WebSocket("ws://192.168.155.94:8080/new-game");
+        socket = new WebSocket("ws://10.123.22.94:8080/new-game");
 
         socket.onopen = function(e) {
             console.log("[open] Connection established");
@@ -94,9 +103,11 @@
                     isGameOver = false;
                 }
 
-                if(playerColor === 'b') isBottomWhite = false;
+                if(playerColor === 'b') {
+                    board.orientation('black');
+                    isBottomWhite = false;
+                }
 
-                board.orientation(playerColor === 'w' ? 'white' : 'black');
                 updateTimersDisplay();
                 startWhiteTimer();
 
@@ -140,12 +151,20 @@
                     i++;
                 }
 
+                if(moveHistory.length > 3) {
+                    document.getElementById('abort-btn').classList.add('hidden');
+                    document.getElementById('resign-btn').classList.remove('hidden');
+                }
+
                 while(i < parts.length) {
                     timeStamps.push([parseInt(parts[i].substring(0, parts[i].indexOf('-') + 1)), parseInt(parts[i].substring(parts[i].indexOf('-')+1, parts[i].length))]);
                     i++;
                 }
 
-                board.orientation(playerColor === 'w' ? 'white' : 'black');
+                if(playerColor === 'b') {
+                    board.orientation('black');
+                    isBottomWhite = false;
+                }
 
                 updateTimersDisplay();
                 handleTurnTimer();
@@ -169,19 +188,19 @@
                 clearMoveHistory();
                 board.position('start', false);
 
-                board.orientation(playerColor === 'w' ? 'white' : 'black');
+                if(isBottomWhite && (playerColor !== 'w')) changeOrientation();
 
                 updateTimersDisplay();
                 startWhiteTimer();
                 isGameOver = false;
 
                 addChatMessage("System", `${myName} vs ${opponentName}`);
+                clearHighlightedSquares();
                 break;
 
             case 'move': // Response to our move attempt
                 if (parts[1] === 'false') {
                     board.position(moveHistory[moveHistory.length - 1], false);
-                    addChatMessage("System", "Invalid move rejected by server.");
                     break;
                 }
                 else {
@@ -224,7 +243,12 @@
                     updateMoveHistory(lastMove, currentTurn, board.fen());
 
                     changeTurn();
-                    handleTurnTimer();                    
+                    handleTurnTimer();
+                    
+                    if(moveHistory.length > 3) {
+                        document.getElementById('abort-btn').classList.add('hidden');
+                        document.getElementById('resign-btn').classList.remove('hidden');
+                    }
                 }
                 break;
 
@@ -253,6 +277,11 @@
 
                 changeTurn();
                 handleTurnTimer();
+
+                if(moveHistory.length > 3) {
+                    document.getElementById('abort-btn').classList.add('hidden');
+                    document.getElementById('resign-btn').classList.remove('hidden');
+                }
                 break;
             
             case 'result': // Game has ended
@@ -281,6 +310,21 @@
                 break;
             case 'rn':
                 addChatMessage("System", "Opponent is not available for rematch.");
+                break;
+            case 'opp-left':
+                oppLeftTime = 30;
+                oppAbortEle.classList.remove('hidden');
+                oppLeftTimer = setInterval(()=>{
+                    oppLeftTime--;
+                    oppAbortEle.innerText = `Auto-${moveHistory.length > 3 ? 'Abandon' : 'Abort'} in 0:${oppLeftTime}`;
+                }, 1000);
+                break;
+
+            case 'opp-back':
+                clearInterval(oppLeftTimer);
+                oppLeftTimer = null;
+                oppAbortEle.innerHTML = '';
+                oppAbortEle.classList.add('hidden');
                 break;
         }
     }
@@ -337,9 +381,15 @@
             addChatMessage("System", "Go to the latest move to play.");
             return false;
         }
+
+        // disable scroll
+        document.body.style.overflow = 'hidden';
     }
 
     function onDrop(source, target) {
+        // enable scroll
+        document.body.style.overflow = '';
+
         if(isGameOver) return;
         
         const position = board.position();
@@ -418,7 +468,7 @@
     }
 
     // --- UI Update Functions ---
-    function updateMoveHistory(san, color, fen) {
+    function updateMoveHistory(move, color, fen) {
         // Add the new FEN to our history for navigation
         moveHistory.push(fen);
         currentMoveIndex = moveHistory.length - 1;
@@ -427,18 +477,20 @@
 
         if (color === 'w') {
             const newRow = document.createElement('tr');
-            newRow.innerHTML = `<td class="p-1">${moveNumber}.</td><td class="p-1 font-semibold cursor-pointer" data-move-index="${currentMoveIndex}">${san}</td><td class="p-1 font-semibold"></td>`;
+            newRow.innerHTML = `<td class="p-1">${moveNumber}.</td><td class="p-1 font-semibold cursor-pointer" data-move-index="${currentMoveIndex}">${move}</td><td class="p-1 font-semibold"></td>`;
             movesTbody.appendChild(newRow);
         } else {
             const lastRow = movesTbody.lastElementChild;
             if(lastRow && lastRow.children.length > 2) {
-                lastRow.children[2].textContent = san;
+                lastRow.children[2].textContent = move;
                 lastRow.children[2].classList.add('cursor-pointer');
                 lastRow.children[2].dataset.moveIndex = currentMoveIndex;
             }
         }
         movesTbody.parentElement.scrollTop = movesTbody.parentElement.scrollHeight;
         updateNavButtons();
+        highlightMove(move.substring(0,2), move.substring(2, 4));
+        highlightMoveNotation(currentMoveIndex);
     }
 
     
@@ -459,121 +511,22 @@
     }
 
     function replaceDrawOptionsWithRematchOptions() {
-        const actionsContainer = document.getElementById('game-actions');
-        if (!actionsContainer) return;
+        document.getElementById('draw-btn').classList.add('hidden');
+        document.getElementById('resign-btn').classList.add('hidden');
+        document.getElementById('abort-btn').classList.add('hidden');
 
-        // Clear existing buttons from the container
-        actionsContainer.innerHTML = '';
-
-        /**
-         * Creates a button element with styles matching the original HTML.
-         * @param {string} id - The ID for the button.
-         * @param {string} text - The text content of the button.
-         * @param {string} bgColor - The Tailwind CSS class for the background color.
-         * @param {string} hoverColor - The Tailwind CSS class for the hover state background color.
-         * @param {function} handler - The function to execute on click.
-         * @returns {HTMLButtonElement}
-         */
-        const createButton = (id, text, bgColor, hoverColor, handler) => {
-            const btn = document.createElement('button');
-            btn.id = id;
-            btn.textContent = text;
-            // Apply the exact same classes as the original HTML buttons
-            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg ${hoverColor}`;
-            btn.onclick = handler;
-            return btn;
-        };
-
-        const rematchBtn = createButton(
-            'rematch-btn',
-            'Rematch',
-            'bg-blue-600',
-            'hover:bg-blue-700',
-            () => {
-                if (socket) {
-                    socket.send('req-rematch');
-                } else {
-                    const para = document.createElement('p');
-                    para.textContent = 'Connection lost. Please start a new game.';
-                    para.className = 'col-span-2 text-center text-sm';
-                    actionsContainer.appendChild(para);
-                }
-            }
-        );
-
-        const newGameBtn = createButton(
-            'new-game-btn',
-            'New Game',
-            'bg-green-600',
-            'hover:bg-green-700',
-            () => {
-                if (socket) {
-                    socket.send('new-game');
-                } else {
-                    initWebSocket();
-                }
-            }
-        );
-
-        // Append new buttons directly to the grid container
-        actionsContainer.appendChild(rematchBtn);
-        actionsContainer.appendChild(newGameBtn);
+        document.getElementById('rematch-btn').classList.remove('hidden');
+        document.getElementById('new-game-btn').classList.remove('hidden');
     }
 
 
     function replaceRematchOptionsWithDrawOptions() {
-        const actionsContainer = document.getElementById('game-actions');
-        if (!actionsContainer) return;
+        document.getElementById('rematch-btn').classList.add('hidden');
+        document.getElementById('new-game-btn').classList.add('hidden');
+        document.getElementById('resign-btn').classList.add('hidden');
 
-        // Clear existing buttons from the container
-        actionsContainer.innerHTML = '';
-
-        /**
-         * Creates a button element with styles matching the original HTML.
-         * @param {string} id - The ID for the button.
-         * @param {string} text - The text content of the button.
-         * @param {string} bgColor - The Tailwind CSS class for the background color.
-         * @param {string} hoverColor - The Tailwind CSS class for the hover state background color.
-         * @param {function} handler - The function to execute on click.
-         * @returns {HTMLButtonElement}
-         */
-        const createButton = (id, text, bgColor, hoverColor, handler) => {
-            const btn = document.createElement('button');
-            btn.id = id;
-            btn.textContent = text;
-            // Apply the exact same classes as the original HTML buttons
-            btn.className = `w-full px-4 py-2 ${bgColor} text-white rounded-lg ${hoverColor}`;
-            btn.onclick = handler;
-            return btn;
-        };
-
-        const drawBtn = createButton(
-            'draw-btn',
-            'Offer Draw',
-            'bg-blue-600',
-            'hover:bg-blue-700',
-            () => {
-                if (socket) {
-                    socket.send('req-draw');
-                }
-            }
-        );
-
-        const resignBtn = createButton(
-            'resign-btn',
-            'Resign',
-            'bg-red-600',
-            'hover:bg-red-700',
-            () => {
-                if (socket) {
-                    socket.send('resign');
-                }
-            }
-        );
-
-        // Append new buttons directly to the grid container
-        actionsContainer.appendChild(drawBtn);
-        actionsContainer.appendChild(resignBtn);
+        document.getElementById('draw-btn').classList.remove('hidden');
+        document.getElementById('abort-btn').classList.remove('hidden');
     }
 
     function handleGameResult(result, reason, whiteScore, blackScore) {
@@ -596,13 +549,15 @@
         let titleMessage = '';
         let resultMessage = '';
 
-        if (result === 'd') {
+        if(result === 'a') {
+            titleMessage = 'Aborted';
+        } else if (result === 'd') {
             titleMessage = 'Draw';
             resultMessage = `By ${reason}`;
         } else if ((result === 'w' && playerColor === 'w') || (result === 'b' && playerColor === 'b')) {
             titleMessage = 'You Won';
             resultMessage = `By ${reason}`;
-        } else {
+        } else{
             titleMessage = 'You Lost';
             resultMessage = `By ${reason}`;
         }
@@ -703,6 +658,8 @@
 
 
     function changeOrientation() {
+        if(oppAbortEle != null) oppLeftTimer = playerColor == 'w' ? document.getElementById(isBottomWhite ? 'bottom-auto-msg' : 'top-auto-msg') : document.getElementById(isBottomWhite ? 'top-auto-msg' : 'bottom-auto-msg');
+
         let bottomNameEle = document.getElementById('bottom-name')
         let topNameEle = document.getElementById('top-name');
         
@@ -718,6 +675,38 @@
         board.orientation(isBottomWhite ? 'white' : 'black');
     }
 
+    function clearHighlightedSquares() {
+        lastHighlighted.forEach(square => {
+            const el = document.querySelector(`.square-${square}`);
+            if (el) el.classList.remove('highlight-from', 'highlight-to');
+        });
+        lastHighlighted = [];
+    }
+
+    function highlightMove(from, to) {
+        clearHighlightedSquares();
+        console.log(from, to);
+        const fromEl = document.querySelector(`.square-${from}`);
+        const toEl = document.querySelector(`.square-${to}`);
+        if (fromEl) fromEl.classList.add('highlight-from');
+        if (toEl) toEl.classList.add('highlight-to');
+        lastHighlighted = [from, to];
+    }
+
+
+    function highlightMoveNotation(moveIndex) {
+        // Clear previous
+        if (lastHighlightedMoveCell) {
+            lastHighlightedMoveCell.classList.remove('highlight-move');
+        }
+
+        // Find the cell with the current move index
+        const moveCell = movesTbody.querySelector(`[data-move-index="${moveIndex}"]`);
+        if (moveCell) {
+            moveCell.classList.add('highlight-move');
+            lastHighlightedMoveCell = moveCell;
+        }
+    }
 
     async function getUserStatus() {
         try {
@@ -737,9 +726,37 @@
                 myName = data.username;
 
                 console.log(`Username: ${myName}`);
+
+                const authArea = document.getElementById('auth-area');
+                    authArea.innerHTML = `
+                    <button id="burger" class="text-white focus:outline-none">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                    </button>
+                    <div id="dropdown" class="hidden absolute right-0 mt-2 w-40 bg-gray-800 rounded shadow-md z-50">
+                        <a href="/player/${myName}" class="block px-4 py-2 hover:bg-gray-700">Profile</a>
+                        <a id="logout-btn" href="/logout" class="block px-4 py-2 hover:bg-gray-700">Logout</a>
+                    </div>
+                `;
+
+                document.getElementById('burger').onclick = () => {
+                    document.getElementById('dropdown').classList.toggle('hidden');
+                };
+
+                document.getElementById('logout-btn').onclick = async (e) => {
+                    e.preventDefault();
+                    const res = await fetch('/logout');
+                    if (res.ok) {
+                        window.location.href = "/";
+                    }
+                };
             }  
             else {
                 console.log("User is not logged in");
+
+                authArea.innerHTML = `
+                    <button onclick="showLoginModal()" class="bg-blue-700 px-4 py-2 rounded hover:bg-blue-600">Login</button>
+                    <button onclick="showSignupModal()" class="bg-green-700 px-4 py-2 rounded hover:bg-green-600">Signup</button>
+                `;
             }          
 
         } catch (error) {
@@ -769,6 +786,10 @@
                 board.position(moveHistory[currentMoveIndex], false); // No animation
                 updateTimersAt(currentMoveIndex);
                 updateNavButtons();
+                if(currentMoveIndex === 0) return;
+                const move = document.querySelector(`[data-move-index="${currentMoveIndex}"]`).innerText;
+                highlightMove(move.substring(0,2), move.substring(2, 4));
+                highlightMoveNotation(currentMoveIndex);
             }
         });
 
@@ -778,6 +799,9 @@
                 board.position(moveHistory[currentMoveIndex], false); // No animation
                 updateTimersAt(currentMoveIndex);
                 updateNavButtons();
+                const move = document.querySelector(`[data-move-index="${currentMoveIndex}"]`).innerText;
+                highlightMove(move.substring(0,2), move.substring(2, 4));
+                highlightMoveNotation(currentMoveIndex);
             }
         });
 
@@ -791,6 +815,8 @@
                     board.position(moveHistory[currentMoveIndex], false);
                     if(currentMoveIndex != moveHistory.length - 1) updateTimersAt(currentMoveIndex);
                     updateNavButtons();
+                    highlightMove(target.innerText.substring(0,2), target.innerText.substring(2, 4));
+                    highlightMoveNotation(currentMoveIndex);
                 }
             }
         });
@@ -798,8 +824,19 @@
         document.getElementById('orientation-btn').addEventListener('click', changeOrientation);
 
         // Game Actions and Chat listeners remain the same...
+        document.getElementById('abort-btn').addEventListener('click', () => socket.send('abort'));
         document.getElementById('draw-btn').addEventListener('click', () => socket.send('req-draw'));
         document.getElementById('resign-btn').addEventListener('click', () => socket.send('resign'));
+        document.getElementById('rematch-btn').addEventListener('click', () => {
+            socket.send('req-rematch');
+            addChatMessage('System', "Rematch request sent...");
+            gameOverModal.classList.add('hidden')
+        });
+        document.getElementById('new-game-btn').addEventListener('click', () => {
+            socket.send('new-game');
+            addChatMessage('System', "Matching you with a new opponent...");
+            gameOverModal.classList.add('hidden');
+        });
         document.getElementById('send-chat-btn').addEventListener('click', () => {
             const input = document.getElementById('chat-input');
             if (input.value) {
@@ -835,6 +872,75 @@
         });
     }
 
+    function showLoginModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Log In</h2>
+                <input id="login-username" type="text" placeholder="Username" class="w-full mb-3 px-3 py-2 bg-gray-700 rounded">
+                <input id="login-password" type="password" placeholder="Password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-500 py-2 rounded">Log In</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function showSignupModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div id="signup-step1" class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Sign Up - Step 1</h2>
+                <input id="signup-username" type="text" placeholder="Choose a username" class="w-full mb-2 px-3 py-2 bg-gray-700 rounded">
+                <p id="username-error" class="text-red-400 text-sm mb-3 hidden">Username already exists. Try a different one.</p>
+                <button onclick="checkUsername()" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Next</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function checkUsername() {
+        const username = document.getElementById("signup-username").value;
+        fetch(`/username/unique?username=${encodeURIComponent(username)}`)
+            .then(res => res.json())
+            .then(isUnique => {
+                if (isUnique) {
+                    document.getElementById("signup-step1").innerHTML = `
+                    <h2 class="text-xl font-semibold mb-4">Sign Up - Step 2</h2>
+                    <input id="signup-password" type="password" placeholder="Choose a password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                    <button onclick="handleSignup('${username}')" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Sign Up</button>
+                    <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+                    `;
+                } else {
+                    document.getElementById("username-error").classList.remove("hidden");
+                }
+            });
+    }
+
+    function handleLogin() {
+        const username = document.getElementById("login-username").value;
+        const password = document.getElementById("login-password").value;
+        fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(()=> {
+            location.reload();
+        });
+    }
+
+    function handleSignup(username) {
+        const password = document.getElementById("signup-password").value;
+        fetch("/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(() => window.location.reload());
+    }
+
+    function closeModal() {
+        document.getElementById("modal-area").innerHTML = "";
+    }
+
     // --- Initialization ---
     async function init() {
         const config = {
@@ -851,7 +957,8 @@
             highlight: false,
             onError: "console"
         };
-        board = Chessboard('board', config);        
+        board = Chessboard('board', config);   
+        board.orientation('white');     
 
         await getUserStatus();
         initWebSocket();

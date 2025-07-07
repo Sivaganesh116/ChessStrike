@@ -1,4 +1,4 @@
-document.addEventListener("DOMContentLoaded", function () {
+// document.addEventListener("DOMContentLoaded", function () {
 
     const charToReason = {
         r: "Repitition",
@@ -11,7 +11,7 @@ document.addEventListener("DOMContentLoaded", function () {
         R: "Resignation"
     };
 
-
+    let myName = null;
     const boardElementId = 'board';
     const movesTbody = document.getElementById('moves-tbody');
     const prevBtn = document.getElementById('prev-btn');
@@ -25,6 +25,9 @@ document.addEventListener("DOMContentLoaded", function () {
     let currentMoveIndex = 0;
 
     let enpassantSquare = null;
+
+    let lastHighlighted = [];
+    let lastHighlightedMoveCell = null;
 
     function updateNavButtons() {
         prevBtn.disabled = currentMoveIndex <= 0;
@@ -51,28 +54,59 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     function updateMoveHistory(san, color, fen, index) {
+        // Add the new FEN to our history for navigation
         moveHistory.push(fen);
+        currentMoveIndex = moveHistory.length - 1;
+
         const moveNumber = Math.ceil(moveHistory.length / 2);
 
         if (color === 'w') {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td class="p-1">${moveNumber}</td>
-                <td class="p-1 font-semibold cursor-pointer" data-move-index="${index}">${san}</td>
-                <td class="p-1 font-semibold"></td>
-            `;
-            movesTbody.appendChild(row);
+            const newRow = document.createElement('tr');
+            newRow.innerHTML = `<td class="p-1">${moveNumber}.</td><td class="p-1 font-semibold cursor-pointer" data-move-index="${currentMoveIndex}">${san}</td><td class="p-1 font-semibold"></td>`;
+            movesTbody.appendChild(newRow);
         } else {
             const lastRow = movesTbody.lastElementChild;
-            if (lastRow) {
-                const cell = lastRow.children[2];
-                cell.textContent = san;
-                cell.classList.add('cursor-pointer');
-                cell.dataset.moveIndex = index;
+            if(lastRow && lastRow.children.length > 2) {
+                lastRow.children[2].textContent = san;
+                lastRow.children[2].classList.add('cursor-pointer');
+                lastRow.children[2].dataset.moveIndex = currentMoveIndex;
             }
         }
-
         movesTbody.parentElement.scrollTop = movesTbody.parentElement.scrollHeight;
+        updateNavButtons();
+    }
+
+    function clearHighlightedSquares() {
+        lastHighlighted.forEach(square => {
+            const el = document.querySelector(`.square-${square}`);
+            if (el) el.classList.remove('highlight-from', 'highlight-to');
+        });
+        lastHighlighted = [];
+    }
+
+    function highlightMove(from, to) {
+        clearHighlightedSquares();
+        console.log(from, to);
+        const fromEl = document.querySelector(`.square-${from}`);
+        const toEl = document.querySelector(`.square-${to}`);
+        if (fromEl) fromEl.classList.add('highlight-from');
+        if (toEl) toEl.classList.add('highlight-to');
+        lastHighlighted = [from, to];
+    }
+
+
+    function highlightMoveNotation(moveIndex) {
+        // Clear previous
+        if (lastHighlightedMoveCell) {
+            lastHighlightedMoveCell.classList.remove('highlight-move');
+        }
+
+        // Find the cell with the current move index
+        const moveCell = movesTbody.querySelector(`[data-move-index="${moveIndex}"]`);
+        if (moveCell) {
+            moveCell.classList.add('highlight-move');
+            lastHighlightedMoveCell = moveCell;
+        }
     }
 
     function insertGameResultBlock(result, reason, whiteUsername, blackUsername) {
@@ -172,6 +206,10 @@ document.addEventListener("DOMContentLoaded", function () {
                 updateTimersAt(currentMoveIndex);
                 updateNavButtons();
                 currentTurn = currentMoveIndex % 2 ? 'b' : 'w';
+                if(currentMoveIndex === 0) return;
+                const move = document.querySelector(`[data-move-index="${currentMoveIndex}"]`).innerText;
+                highlightMove(move.substring(0,2), move.substring(2, 4));
+                highlightMoveNotation(currentMoveIndex);
             }
         });
 
@@ -182,6 +220,9 @@ document.addEventListener("DOMContentLoaded", function () {
                 updateTimersAt(currentMoveIndex);
                 updateNavButtons();
                 currentTurn = currentMoveIndex % 2 ? 'b' : 'w';
+                const move = document.querySelector(`[data-move-index="${currentMoveIndex}"]`).innerText;
+                highlightMove(move.substring(0,2), move.substring(2, 4));
+                highlightMoveNotation(currentMoveIndex);
             }
         });
 
@@ -190,11 +231,13 @@ document.addEventListener("DOMContentLoaded", function () {
             if (target) {
                 const idx = parseInt(target.dataset.moveIndex, 10);
                 if (!isNaN(idx)) {
-                    currentMoveIndex = idx+1;
+                    currentMoveIndex = idx;
                     board.position(moveHistory[currentMoveIndex], false);
                     updateTimersAt(idx);
                     updateNavButtons();
                     currentTurn = currentMoveIndex % 2 ? 'b' : 'w';
+                    highlightMove(target.innerText.substring(0,2), target.innerText.substring(2, 4));
+                    highlightMoveNotation(currentMoveIndex);
                 }
             }
         });
@@ -204,13 +247,20 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function onDragStart(source, piece) {
         if(currentTurn != piece.charAt(0)) return false;
+
+        // disable scroll
+        document.body.style.overflow = 'hidden';
     }
 
     function onDrop(source, target) {
+        // enable scroll
+        document.body.style.overflow = '';
+        
         const position = board.position();
         if(position[target] && position[target].charAt(0) == currentTurn) return 'snapback';
 
         currentTurn = currentTurn == 'w' ? 'b' : 'w';
+        highlightMove(source, target);
     }
 
     function isCastle(move, madeOnBoard) {
@@ -299,6 +349,129 @@ document.addEventListener("DOMContentLoaded", function () {
         overlay.style.display = "none";
     }
 
+    async function getUserStatus() {
+        try {
+            const response = await fetch('/api/user/status', {
+                method: 'GET',
+                credentials: 'include'
+            });
+
+            if(!response.ok) {
+                throw new Error(`HTTP error! User Status: ' ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if(data.loggedIn === true) {
+                myName = data.username;
+
+                console.log(`Username: ${myName}`);
+
+                const authArea = document.getElementById('auth-area');
+                    authArea.innerHTML = `
+                    <button id="burger" class="text-white focus:outline-none">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                    </button>
+                    <div id="dropdown" class="hidden absolute right-0 mt-2 w-40 bg-gray-800 rounded shadow-md z-50">
+                        <a href="/player/${myName}" class="block px-4 py-2 hover:bg-gray-700">Profile</a>
+                        <a id="logout-btn" href="/logout" class="block px-4 py-2 hover:bg-gray-700">Logout</a>
+                    </div>
+                `;
+
+                document.getElementById('burger').onclick = () => {
+                    document.getElementById('dropdown').classList.toggle('hidden');
+                };
+
+                document.getElementById('logout-btn').onclick = async (e) => {
+                    e.preventDefault();
+                    const res = await fetch('/logout');
+                    if (res.ok) {
+                        window.location.href = "/";
+                    }
+                };
+            }  
+            else {
+                console.log("User is not logged in");
+
+                authArea.innerHTML = `
+                    <button onclick="showLoginModal()" class="bg-blue-700 px-4 py-2 rounded hover:bg-blue-600">Login</button>
+                    <button onclick="showSignupModal()" class="bg-green-700 px-4 py-2 rounded hover:bg-green-600">Signup</button>
+                `;
+            }  
+        } catch (error) {
+            console.error("User Status Error: ", error);
+        }
+    }
+
+    function showLoginModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Log In</h2>
+                <input id="login-username" type="text" placeholder="Username" class="w-full mb-3 px-3 py-2 bg-gray-700 rounded">
+                <input id="login-password" type="password" placeholder="Password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-500 py-2 rounded">Log In</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function showSignupModal() {
+        document.getElementById("modal-area").innerHTML = `
+            <div class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-70 z-50">
+            <div id="signup-step1" class="bg-gray-800 p-6 rounded-lg w-full max-w-sm text-white">
+                <h2 class="text-xl font-semibold mb-4">Sign Up - Step 1</h2>
+                <input id="signup-username" type="text" placeholder="Choose a username" class="w-full mb-2 px-3 py-2 bg-gray-700 rounded">
+                <p id="username-error" class="text-red-400 text-sm mb-3 hidden">Username already exists. Try a different one.</p>
+                <button onclick="checkUsername()" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Next</button>
+                <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+            </div>
+            </div>`;
+    }
+
+    function checkUsername() {
+        const username = document.getElementById("signup-username").value;
+        fetch(`/username/unique?username=${encodeURIComponent(username)}`)
+            .then(res => res.json())
+            .then(isUnique => {
+                if (isUnique) {
+                    document.getElementById("signup-step1").innerHTML = `
+                    <h2 class="text-xl font-semibold mb-4">Sign Up - Step 2</h2>
+                    <input id="signup-password" type="password" placeholder="Choose a password" class="w-full mb-4 px-3 py-2 bg-gray-700 rounded">
+                    <button onclick="handleSignup('${username}')" class="w-full bg-green-600 hover:bg-green-500 py-2 rounded">Sign Up</button>
+                    <button onclick="closeModal()" class="mt-2 text-sm text-gray-400 hover:underline">Cancel</button>
+                    `;
+                } else {
+                    document.getElementById("username-error").classList.remove("hidden");
+                }
+            });
+    }
+
+    function handleLogin() {
+        const username = document.getElementById("login-username").value;
+        const password = document.getElementById("login-password").value;
+        fetch("/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(()=> {
+            location.reload();
+        });
+    }
+
+    function handleSignup(username) {
+        const password = document.getElementById("signup-password").value;
+        fetch("/signup", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+        }).then(() => window.location.reload());
+    }
+
+    function closeModal() {
+        document.getElementById("modal-area").innerHTML = "";
+    }
+
     function initBoard() {
         const config = {
             draggable: true,
@@ -362,5 +535,6 @@ document.addEventListener("DOMContentLoaded", function () {
     initBoard();
     setupEventListeners();
     loadGame();
+    getUserStatus();
 
-});
+// });

@@ -50,7 +50,7 @@ document.addEventListener("DOMContentLoaded", function () {
         const path = window.location.pathname;
         gameID = path.slice(path.lastIndexOf('/') + 1);
 
-        socket = new WebSocket(`ws://192.168.155.94:8080/watch?topic=${gameID}`);
+        socket = new WebSocket(`ws://10.123.22.94:8080/watch?topic=${gameID}`);
 
         socket.onopen = function(e) {
             console.log("[open] Connection established");
@@ -299,7 +299,7 @@ document.addEventListener("DOMContentLoaded", function () {
         }
         movesTbody.parentElement.scrollTop = movesTbody.parentElement.scrollHeight;
         updateNavButtons();
-        highlightMove(move.substring(0,2), move.substring(2, 4));
+        highlightMove(san.substring(0,2), san.substring(2, 4));
         highlightMoveNotation(currentMoveIndex);
     }
 

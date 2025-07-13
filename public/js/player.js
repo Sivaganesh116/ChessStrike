@@ -140,7 +140,7 @@
                         i++;
                     }
 
-                    if(parts[i] == "time") {
+                    if(parts[i] === "time") {
                         i++;
                         break;
                     }
@@ -150,6 +150,12 @@
 
                     i++;
                 }
+
+                // if(moveHistory.length > 1) {
+                //     highlightMove(parts[i - 2].substring(0, 2), parts[i - 2].substring(2, 4));
+                //     highlightMoveNotation(currentMoveIndex);
+                // }
+
 
                 if(moveHistory.length > 3) {
                     document.getElementById('abort-btn').classList.add('hidden');
@@ -188,7 +194,10 @@
                 clearMoveHistory();
                 board.position('start', false);
 
-                if(isBottomWhite && (playerColor !== 'w')) changeOrientation();
+                document.getElementById('bottom-name').innerText = myName;
+                document.getElementById('top-name').innerText = opponentName;
+
+                board.orientation(playerColor === 'w' ? 'white' : 'black');
 
                 updateTimersDisplay();
                 startWhiteTimer();
@@ -319,12 +328,14 @@
                     oppAbortEle.innerText = `Auto-${moveHistory.length > 3 ? 'Abandon' : 'Abort'} in 0:${oppLeftTime}`;
                 }, 1000);
                 break;
-
             case 'opp-back':
                 clearInterval(oppLeftTimer);
                 oppLeftTimer = null;
                 oppAbortEle.innerHTML = '';
                 oppAbortEle.classList.add('hidden');
+                break;
+            case 'no-game':
+                showOverlay('Something went wrong while creating a new game. Please go back and start new game.');
                 break;
         }
     }

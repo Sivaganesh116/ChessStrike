@@ -3,6 +3,7 @@
 extern std::shared_ptr<uv_loop_t> uv_loop;
 
 void timerCallback(uv_poll_t* poll, int status, int events) {
+    std::cout << "timer callback\n";
     if(status < 0) {
         perror("Something went wrong with player timer expiry");
         return;
@@ -201,6 +202,7 @@ PlayerData::PlayerData() {
     inGame_ = false;
     askedRematch_ = false;
     abandonTimer_ = us_create_timer((us_loop_t*) uWS::Loop::get(), 1, sizeof(PlayerData*));
+    isConnected_ = false;
 }
 
 PlayerData::PlayerData(PlayerData&& other) : moveTimer_(std::move(other.moveTimer_)) {
@@ -211,6 +213,7 @@ PlayerData::PlayerData(PlayerData&& other) : moveTimer_(std::move(other.moveTime
     offeredDraw_ = other.offeredDraw_;
     ws_ = other.ws_;
     otherWS_ = other.otherWS_;
+    isConnected_ = other.isConnected_;
 
     // set the ext data so that poll's callback won't point to player data that is about to be freed
     if(moveTimer_) moveTimer_->setExtData(this);
@@ -251,6 +254,16 @@ void PlayerData::startAbandonTimer() {
 void PlayerData::stopAbandonTimer() {
     us_timer_set(abandonTimer_, [](us_timer_t* timer){}, 0, 0);
 }
+
+PlayerDataPointer::PlayerDataPointer() : playerData_(nullptr) {}
+
+PlayerDataPointer::PlayerDataPointer(PlayerData* pd) : playerData_(pd) {}
+
+PlayerDataPointer::PlayerDataPointer(PlayerDataPointer&& other) : playerData_(other.playerData_) {
+    other.playerData_ = nullptr;
+}
+
+PlayerDataPointer::~PlayerDataPointer() = default;
 
 GameManager::GameManager(int id, PlayerData* whiteData, PlayerData* blackData) : gameID_(id), whiteData_(whiteData), blackData_(blackData), whiteScore_(0), blackScore_(0), syncTimer_(new uv_timer_t()), timeStamps_("300-300 ") {
     sGameID_ = std::to_string(id);
@@ -297,7 +310,7 @@ void GameManager::gameResultHandler(bool isDraw, bool whiteWon, std::string_view
     publishResultJson["whiteScore"] = whiteScore_;
     publishResultJson["blackScore"] = blackScore_;
 
-    whiteData_->ws_->publish(sGameID_, publishResultJson.dump(), uWS::OpCode::TEXT);
+    app->publish(sGameID_, publishResultJson.dump(), uWS::OpCode::TEXT);
 
     gameResultDBHandler(dbReason, isDraw, whiteWon, moveHistory, timeStamps);    
 }
@@ -403,6 +416,17 @@ void GameManager::gameResultDBHandler(std::string dbReason, bool isDraw, bool wh
             std::cerr << "Error handling db operations of game result of game id: " << gameID_ << ". " << e.what() << std::endl;
         }
     });
+
+    // clean up memory if players had left the game
+    if(!whiteData_->ws_) {
+        closedConnections.erase(whiteData_->id_);
+        delete whiteData_;
+    }
+
+    if(!blackData_->ws_) {
+        closedConnections.erase(blackData_->id_);
+        delete blackData_;
+    }
 }
 
 void GameManager::resetData() {

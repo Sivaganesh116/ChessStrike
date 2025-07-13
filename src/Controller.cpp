@@ -9,6 +9,10 @@
 
 #include <string>
 #include <fstream>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 using json = nlohmann::json;
 PlayerData* randWaitingPlayer = nullptr, *regWaitingPlayer = nullptr;
@@ -25,6 +29,8 @@ std::unordered_map<int, GameManager*> liveGames;
 std::unordered_map<int, GameManager*> playersInGame;
 
 extern std::shared_ptr<uv_loop_t> uv_loop;
+extern std::unique_ptr<uWS::SSLApp> app;
+extern uWS::Loop* uWSLoop;
 
 
 // Helper function to determine the content type from a file extension
@@ -145,50 +151,81 @@ void matchPlayer(PlayerData* newPlayerData, bool randGame) {
         int gameID = -1;
 
         if(!randGame) {
-            auto connHandle = cPool.acquire();
-            pqxx::work txn(*connHandle->get());
+            try {
+                auto connHandle = cPool.acquire();
+                pqxx::work txn(*connHandle->get());
 
-            pqxx::result txnResult = txn.exec(
-                pqxx::zview("INSERT INTO game (white_name, black_name) "
-                "VALUES ($1, $2) RETURNING id"),
-                pqxx::params((waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_), (!waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_))
-            );
+                pqxx::result txnResult = txn.exec(
+                    pqxx::zview("INSERT INTO game (white_name, black_name) "
+                    "VALUES ($1, $2) RETURNING id"),
+                    pqxx::params((waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_), (!waitingPlayer->isWhite_ ? waitingPlayer->name_ : newPlayerData->name_))
+                );
 
-            if(txnResult.empty()) {
-                std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+                if(txnResult.empty()) {
+                    std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+                    return;
+                }
+
+                txn.commit();
+
+                gameID = txnResult[0][0].as<int>();
+            } catch(std::exception& e) {
+                std::cerr << "Couldn't create a new game entry\n";
+                uWSLoop->defer([waitingPlayer, newPlayerData, gameID] {
+                    waitingPlayer->inGame_ = newPlayerData->inGame_ = false;
+
+                    if(waitingPlayer->ws_) {
+                        // send that the game cannot be started
+                        waitingPlayer->ws_->send("no-game", uWS::OpCode::TEXT);
+                        waitingPlayer->ws_->end();
+                    }
+                    else {
+                        delete waitingPlayer;
+                    }
+
+                    if(newPlayerData->ws_) {
+                        // send that the game cannot be started
+                        newPlayerData->ws_->send("no-game", uWS::OpCode::TEXT);
+                        newPlayerData->ws_->end();
+                    }
+                    else {
+                        delete newPlayerData;
+                    }
+                });
+
                 return;
             }
-
-            gameID = txnResult[0][0].as<int>();
-
-            txn.commit();
         }
 
         waitingPlayer->gameManager_ = newPlayerData->gameManager_ = std::make_shared<GameManager>(gameID, waitingPlayer->isWhite_ ? waitingPlayer : newPlayerData, newPlayerData->isWhite_ ? waitingPlayer : newPlayerData);
 
-        std::stringstream toNewPlayer;
-        toNewPlayer << "start-game" << " " << newPlayerData->gameManager_->sGameID_ << " " << (newPlayerData->isWhite_ ? "w" : "b") << " " << waitingPlayer->name_ << " " << "300"; 
+        uWSLoop->defer([waitingPlayer, newPlayerData, gameID] {
+            std::stringstream toNewPlayer;
+            toNewPlayer << "start-game" << " " << newPlayerData->gameManager_->sGameID_ << " " << (newPlayerData->isWhite_ ? "w" : "b") << " " << waitingPlayer->name_ << " " << "300"; 
 
-        std::stringstream toWaitingPlayer;
-        toWaitingPlayer << "start-game" << " " << waitingPlayer->gameManager_->sGameID_ << " " << (waitingPlayer->isWhite_ ? "w" : "b") << " " << newPlayerData->name_ << " " << "300"; 
+            std::stringstream toWaitingPlayer;
+            toWaitingPlayer << "start-game" << " " << waitingPlayer->gameManager_->sGameID_ << " " << (waitingPlayer->isWhite_ ? "w" : "b") << " " << newPlayerData->name_ << " " << "300"; 
 
-        newPlayerData->ws_->send(toNewPlayer.str(), uWS::OpCode::TEXT);
-        waitingPlayer->ws_->send(toWaitingPlayer.str(), uWS::OpCode::TEXT);
+            if(newPlayerData->ws_) newPlayerData->ws_->send(toNewPlayer.str(), uWS::OpCode::TEXT);
+            if(waitingPlayer->ws_) waitingPlayer->ws_->send(toWaitingPlayer.str(), uWS::OpCode::TEXT);
 
-        newPlayerData->ws_->subscribe(std::to_string(gameID));
-        waitingPlayer->ws_->subscribe(std::to_string(gameID));
+            // we are using different msg format for players and watchers, so no need to subscribe to game
+            // newPlayerData->ws_->subscribe(std::to_string(gameID));
+            // waitingPlayer->ws_->subscribe(std::to_string(gameID));
 
-        playersInGame.insert({waitingPlayer->id_, waitingPlayer->gameManager_.get()});
-        playersInGame.insert({newPlayerData->id_, newPlayerData->gameManager_.get()});
+            playersInGame.insert({waitingPlayer->id_, waitingPlayer->gameManager_.get()});
+            playersInGame.insert({newPlayerData->id_, newPlayerData->gameManager_.get()});
 
-        liveGames.insert({gameID, waitingPlayer->gameManager_.get()});
+            liveGames.insert({gameID, waitingPlayer->gameManager_.get()});
 
-        if(waitingPlayer->isWhite_) {
-            waitingPlayer->moveTimer_->start();
-        }
-        else {
-            newPlayerData->moveTimer_->start();
-        }
+            if(waitingPlayer->isWhite_) {
+                waitingPlayer->moveTimer_->start();
+            }
+            else {
+                newPlayerData->moveTimer_->start();
+            }
+        });
+        
 
         // we are using a per move time sync, no need for a repeat timer to send time updates for now
 
@@ -298,22 +335,26 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
             // stop the running abandon timer
             playerData->stopAbandonTimer();
 
+            PlayerDataPointer pdp(playerData);
+
             if(!connectionAborted) 
-                res->template upgrade<PlayerData>(std::move(*playerData), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
+                res->template upgrade<PlayerDataPointer>(std::move(pdp), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
             else std::cout << "Connection Aborted before upgrade\n";
         }
         else if(playersInGame.find(id) != playersInGame.end()) {
             // To-Do: should i refuse the connection or let it play with this new connection?
-            res->writeHeader("Content-Type", "text/plain")->end("You are already playing in the requested game. Please switch back to the running game's tab.");
+            res->writeStatus("400 Bad Request")->writeHeader("Content-Type", "text/plain")->end("You are already playing in the requested game. Please switch back to the running game's tab.");
             return;
         }
         else {
-            PlayerData playerData;
-            playerData.name_ = username;
-            playerData.id_ = id;
+            PlayerData* playerData = new PlayerData();
+            playerData->name_ = username;
+            playerData->id_ = id;
+    
+            PlayerDataPointer pdp(playerData);
 
             if(!connectionAborted) 
-                res->template upgrade<PlayerData>(std::move(playerData), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
+                res->template upgrade<PlayerDataPointer>(std::move(pdp), secWebSocketKey, secWebSocketProtocol, secWebSocketExtensions, context);
             else std::cout << "Connection Aborted before upgrade\n";
         }
     }
@@ -325,7 +366,7 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
 }
 
 
-void gameMoveHandler(uWS::WebSocket<true, true, PlayerData>* ws, PlayerData* movedPlayerData, std::string move) {
+void gameMoveHandler(uWS::WebSocket<true, true, PlayerDataPointer>* ws, PlayerData* movedPlayerData, std::string move) {
     auto & chess = movedPlayerData->chess_;
 
     try {
@@ -362,7 +403,7 @@ void gameMoveHandler(uWS::WebSocket<true, true, PlayerData>* ws, PlayerData* mov
     publishJson["blackNanoSec"] = std::to_string(bnsec);
     
 
-    ws->publish(movedPlayerData->gameManager_->sGameID_, publishJson.dump(), uWS::OpCode::TEXT);
+    app->publish(movedPlayerData->gameManager_->sGameID_, publishJson.dump(), uWS::OpCode::TEXT);
 
     movedPlayerData->gameManager_->timeStamps_ += swsec + "-" + sbsec + " ";
 
@@ -385,17 +426,6 @@ void gameMoveHandler(uWS::WebSocket<true, true, PlayerData>* ws, PlayerData* mov
             else if(chess->isDrawByInsufficientMaterial()) reason = "Insufficient Material", dbReason = "i";
             else if(chess->isDrawByRepitition()) reason = "Repitition", dbReason = "r";
             else if(chess->isDrawBy50MoveRule()) reason = "50 Half Moves", dbReason = "f";
-        }
-
-        PlayerData *whiteData, *blackData;
-
-        if(movedPlayerData->isWhite_) {
-            whiteData = movedPlayerData;
-            blackData = movedPlayerData->otherWS_->getUserData();
-        }
-        else {
-            blackData = movedPlayerData;
-            whiteData = movedPlayerData->otherWS_->getUserData();
         }
 
         movedPlayerData->gameManager_->gameResultHandler(isDraw, whiteWon, reason, dbReason);
@@ -438,6 +468,7 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 
         if(txnResult.empty()) {
             std::cerr << "Couldn't fetch new game_id after insertion." << std::endl;
+            //To-Do: Notify users that game couldn't be started
             return;
         }
 
@@ -445,44 +476,46 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 
         std::string sNewGameID = txnResult[0][0].as<std::string>();
 
-
-        std::stringstream toP1;
-        toP1 << "start-rematch" << " " << sNewGameID << " " << (p1->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
-
-        std::stringstream toP2;
-        toP2 << "start-rematch" << " " << sNewGameID << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
-
-        std::cout << "player's re-matched" << std::endl;
-
-        p1->ws_->send(toP1.str(), uWS::OpCode::TEXT);
-        p2->ws_->send(toP2.str(), uWS::OpCode::TEXT);
-
-        // It is assumed that all the relvant data of both players and game is reset
-
-        // publish to old topic about rematch to subscribers/watchers
-        json rematchJson;
-        rematchJson["type"] = "rematch";
-        rematchJson["newGameID"] = sNewGameID;
-        p1->ws_->publish(p1->gameManager_->sGameID_, rematchJson.dump(), uWS::OpCode::TEXT);
-
         p1->gameManager_->gameID_ = stoi(sNewGameID);
         p1->gameManager_->sGameID_ = sNewGameID;
 
-        if(p1->isWhite_) {
-            p1->gameManager_->whiteData_ = p1;
-            p1->gameManager_->blackData_ = p2;
-            p1->moveTimer_->start();
-        }
-        else {
-            p1->gameManager_->whiteData_ = p2;
-            p1->gameManager_->blackData_ = p1;
-            p2->moveTimer_->start();
-        }
 
-        playersInGame.insert({p1->id_, p1->gameManager_.get()});
-        playersInGame.insert({p2->id_, p2->gameManager_.get()});
+        uWSLoop->defer([p1, p2, sNewGameID]() {
+            std::stringstream toP1;
+            toP1 << "start-rematch" << " " << sNewGameID << " " << (p1->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
 
-        liveGames.insert({stoi(sNewGameID), p1->gameManager_.get()});
+            std::stringstream toP2;
+            toP2 << "start-rematch" << " " << sNewGameID << " " << (p2->isWhite_ ? "w" : "b") << " " << "300" << " " << "300";
+
+            std::cout << "player's re-matched" << std::endl;
+
+            if(p1->ws_) p1->ws_->send(toP1.str(), uWS::OpCode::TEXT);
+            if(p2->ws_) p2->ws_->send(toP2.str(), uWS::OpCode::TEXT);
+
+            // It is assumed that all the relvant data of both players and game is reset
+
+            // publish to old topic about rematch to subscribers/watchers
+            json rematchJson;
+            rematchJson["type"] = "rematch";
+            rematchJson["newGameID"] = sNewGameID;
+            app->publish(p1->gameManager_->sGameID_, rematchJson.dump(), uWS::OpCode::TEXT);
+
+            if(p1->isWhite_) {
+                p1->gameManager_->whiteData_ = p1;
+                p1->gameManager_->blackData_ = p2;
+                p1->moveTimer_->start();
+            }
+            else {
+                p1->gameManager_->whiteData_ = p2;
+                p1->gameManager_->blackData_ = p1;
+                p2->moveTimer_->start();
+            }
+
+            playersInGame.insert({p1->id_, p1->gameManager_.get()});
+            playersInGame.insert({p2->id_, p2->gameManager_.get()});
+
+            liveGames.insert({stoi(sNewGameID), p1->gameManager_.get()});
+        });
         
         // we are using a per move time sync, no need for a repeat timer to send time updates for now
 
@@ -491,8 +524,8 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 }
 
 
-void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::string_view msg, uWS::OpCode code) {
-    auto* movedPlayerData = ws->getUserData();
+void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerDataPointer>* ws, std::string_view msg, uWS::OpCode code) {
+    auto* movedPlayerData = ws->getUserData()->playerData_;
     auto * otherData = (movedPlayerData->gameManager_->whiteData_ == movedPlayerData ? movedPlayerData->gameManager_->blackData_ : movedPlayerData->gameManager_->whiteData_);
 
     std::stringstream ss{std::string(msg)};
@@ -502,7 +535,7 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
     if(msgType == "move") {
         if(!movedPlayerData->inGame_) return;
 
-        auto & chess = ws->getUserData()->chess_;
+        auto & chess = movedPlayerData->chess_;
 
         std::string move;
         ss >> move;
@@ -530,8 +563,8 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         ss >> drawResponse;
 
         if(drawResponse == "a") movedPlayerData->gameManager_->gameResultHandler(true, false, "Agreement", "a");
-        else if(otherData->ws_) {
-            otherData->ws_->send("dr", uWS::OpCode::TEXT);
+        else {
+            if(otherData->ws_) otherData->ws_->send("dr", uWS::OpCode::TEXT);
             otherData->offeredDraw_ = false;
         }
     }
@@ -559,17 +592,18 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         }
 
         movedPlayerData->askedRematch_ = true;
+        // if otherData is still present in the game manager other ws will also be present, 
+        // since we make other data null in gamemanger if the connection closes after the game ends
         movedPlayerData->otherWS_->send("rematch", uWS::OpCode::TEXT);
     }
     else if(msgType == "res-rematch") {
         if(movedPlayerData->inGame_) return;
 
-        // suspicious event or the rematch is already begun
-        if(!otherData->askedRematch_) {
+        // middle condition: suspicious event or the rematch is already begun
+        if(!otherData || !otherData->askedRematch_ || otherData->inGame_) {
+            ws->send("rn", uWS::TEXT);
             return;
         }
-
-        if(!otherData) ws->send("rn", uWS::TEXT);
 
         std::string response;
         ss >> response;
@@ -578,7 +612,7 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         if(response == "a") {
             otherData->askedRematch_ = false;
             movedPlayerData->askedRematch_ = false;
-            rematch(movedPlayerData, movedPlayerData->otherWS_->getUserData());
+            rematch(movedPlayerData, otherData);
         }
         else {
             movedPlayerData->otherWS_->send("rr", uWS::OpCode::TEXT);
@@ -592,7 +626,12 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
         movedPlayerData->inGame_ = true;
         
         // player is starting a new game, sever the connection with the previous player
-        if(otherData) otherData->otherWS_ = nullptr;
+        if(otherData) {
+            otherData->otherWS_ = nullptr;
+            
+            if(movedPlayerData->isWhite_) movedPlayerData->gameManager_->blackData_ = nullptr;
+            movedPlayerData->gameManager_->whiteData_ = nullptr;
+        }
 
         if(regWaitingPlayer) matchPlayer(movedPlayerData, false);
         else regWaitingPlayer = movedPlayerData;
@@ -600,20 +639,19 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::strin
 }
 
 
-void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerData> * ws) {
-    auto * newData = ws->getUserData();
+void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerDataPointer> * ws) {
+    auto * newData = ws->getUserData()->playerData_;
 
     // if a reconnection is happening
     if(newData->inGame_) {
+        newData->isConnected_ = true;
         newData->ws_ = ws;
 
-        // change the player data pointer in game manager, as it would be pointing to a dangling after std::move
+        // restore websocket context in other player's data
         if(newData->isWhite_) {
-            newData->gameManager_->whiteData_ = newData;
             newData->gameManager_->blackData_->otherWS_ = ws;
         }
         else {
-            newData->gameManager_->blackData_ = newData;
             newData->gameManager_->whiteData_->otherWS_ = ws;
         }
 
@@ -628,6 +666,7 @@ void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerData> * ws) {
         
         return;
     }
+
 
     PlayerData** waitingPlayer = newData->name_ == "" ? &randWaitingPlayer : &regWaitingPlayer;
     newData->ws_ = ws;
@@ -673,6 +712,7 @@ void randGameMoveHandler(PlayerData* movedPlayerData, std::string move) {
 
 void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::string_view msg, uWS::OpCode code) {
     auto* movedPlayerData = ws->getUserData();
+    auto* otherData = movedPlayerData->isWhite_ ? movedPlayerData->gameManager_->blackData_ : movedPlayerData->gameManager_->whiteData_;
 
     std::stringstream ss{std::string(msg)};
     std::string msgType;
@@ -689,7 +729,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
         randGameMoveHandler(movedPlayerData, move);
     }
     else if(msgType == "chat") {
-        if(!movedPlayerData->otherWS_ || movedPlayerData->otherWS_->getUserData()->inGame_) return;
+        if(!movedPlayerData->otherWS_ || otherData->inGame_) return;
 
         ws->getUserData()->otherWS_->send(msg, uWS::OpCode::TEXT);
     }
@@ -705,7 +745,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
 
         if(res == "a") movedPlayerData->gameManager_->randGameResultHandler(true, false, "Agreement");
         else {
-            movedPlayerData->otherWS_->getUserData()->offeredDraw_ = false;
+            otherData->offeredDraw_ = false;
             movedPlayerData->otherWS_->send("dr", uWS::OpCode::TEXT); // draw reject
         }
     }
@@ -719,7 +759,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
         if(movedPlayerData->inGame_) return;
 
         // if other player exited or already in game
-        if(!movedPlayerData->otherWS_ || movedPlayerData->otherWS_->getUserData()->inGame_) {
+        if(!movedPlayerData->otherWS_ || otherData->inGame_) {
             ws->send("rn", uWS::OpCode::TEXT); // not available
             return;
         }
@@ -732,7 +772,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
         if(movedPlayerData->inGame_) return;
 
         // suspicious event or the rematch is already begun
-        if(!movedPlayerData->otherWS_->getUserData()->askedRematch_) {
+        if(!otherData->askedRematch_) {
             return;
         }
 
@@ -741,8 +781,8 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
 
         // accepted Rematch
         if(response == "a") {
-            rematch(movedPlayerData, movedPlayerData->otherWS_->getUserData());
-            movedPlayerData->otherWS_->getUserData()->askedRematch_ = false;
+            rematch(movedPlayerData, otherData);
+            otherData->askedRematch_ = false;
             movedPlayerData->askedRematch_ = false;
         }
         else {
@@ -750,7 +790,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
         }
 
         // reset rematch status
-        movedPlayerData->otherWS_->getUserData()->askedRematch_ = false;
+        otherData->askedRematch_ = false;
     }
     else if(msgType == "new-game") {
         if(movedPlayerData->inGame_) return;
@@ -762,30 +802,38 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
     }
 }
 
-void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerData> * ws, int code, std::string_view msg) {
-    auto * oldData = ws->getUserData();
+void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerDataPointer> * ws, int code, std::string_view msg) {
+    auto * playerData = ws->getUserData()->playerData_;
+    playerData->isConnected_ = false;
 
-    if(!oldData->inGame_) {
+    if(!playerData->inGame_) {
         std::cout << "Not in game, so setting nullptr in game manager\n";
-        if(oldData->isWhite_) oldData->gameManager_->whiteData_ = nullptr;
-        else oldData->gameManager_->blackData_ = nullptr;
+
+        if(playerData->gameManager_) {
+            if(playerData->isWhite_) {
+                playerData->gameManager_->whiteData_ = nullptr;
+                if(playerData->gameManager_->blackData_) playerData->gameManager_->blackData_->otherWS_ = nullptr;
+            }
+            else {
+                playerData->gameManager_->blackData_ = nullptr;
+                if(playerData->gameManager_->whiteData_) playerData->gameManager_->whiteData_->otherWS_ = nullptr;
+            }
+        }
 
         // reset if the player was in matching phase
-        if(regWaitingPlayer == oldData) regWaitingPlayer = nullptr;
+        if(regWaitingPlayer == playerData) regWaitingPlayer = nullptr;
 
+        delete playerData;
         return;
     }
 
     // store the player data
-    PlayerData* playerData = new PlayerData(std::move(*oldData));
     playerData->ws_ = nullptr;
     
     if(playerData->isWhite_) {
-        playerData->gameManager_->whiteData_ = playerData;
         playerData->gameManager_->blackData_->otherWS_ = nullptr;
     }
     else {
-        playerData->gameManager_->blackData_ = playerData;
         playerData->gameManager_->whiteData_->otherWS_ = nullptr;
     }
 
@@ -833,8 +881,12 @@ void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>*
                 pqxx::result r = txn.exec(query, params);
 
                 if (!r.empty()) {
-                    if(!*aborted)
+
+                    uWSLoop->defer([aborted, res]() {
+                        if(!*aborted)
                         res->writeStatus("409 Conflict")->writeHeader("Content-Type", "text/plain")->end("User already exists");
+                    });
+
                     return;
                 }
 
@@ -852,8 +904,11 @@ void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>*
                 pqxx::result r = txn.exec(query, params);
 
                 if (r.empty() || r[0][1].as<std::string>() != password) {
-                    if(!*aborted)
-                        res->writeStatus("401 Unauthorized")->writeHeader("Content-Type", "text/plain")->end("Invalid credentials.");
+
+                    uWSLoop->defer([aborted, res]() {
+                        if(!*aborted)
+                            res->writeStatus("401 Unauthorized")->writeHeader("Content-Type", "text/plain")->end("Invalid credentials.");
+                    });
 
                     return;
                 }
@@ -863,19 +918,33 @@ void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>*
                 token = createJWT(userID, username);
             }
 
-            if(!*aborted) {
-                // add Secure in cookie when https is implemented
-                res->writeHeader("Set-Cookie", "token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Expires=Wed, 10 Jul 2025 00:00:00 GMT");
-                res->writeHeader("Content-Type", "application/json");
-                json j;
-                j["username"] = username;
-                res->end(j.dump());
-            }
+            uWSLoop->defer([aborted, res, token]() {
+                if(!*aborted) {
+                    // Get current time and add 5 days
+                    auto now = std::chrono::system_clock::now();
+                    auto expiry_time = now + std::chrono::hours(24 * 5); // 5 days
+
+                    // Convert to time_t
+                    std::time_t expiry_time_t = std::chrono::system_clock::to_time_t(expiry_time);
+
+                    // Format to "Wed, 17 Jul 2025 00:00:00 GMT"
+                    std::stringstream ss;
+                    ss << std::put_time(std::gmtime(&expiry_time_t), "%a, %d %b %Y %H:%M:%S GMT");
+                    std::string expires = ss.str();
+
+
+                    // add Secure in cookie when https is implemented
+                    res->writeHeader("Set-Cookie", "token=" + token + "; Path=/; HttpOnly; SameSite=Strict; Expires=" + expires)->end();
+                }
+            });
+
         } catch (const std::exception& e) {
             std::cerr << "Error in login/signup: " << e.what() << '\n';
-            if(!*aborted) {
-                res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
-            }
+            uWSLoop->defer([aborted, res]() {
+                if(!*aborted) {
+                    res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
+                }
+            });
         }
     });
 }
@@ -920,22 +989,30 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
 
                     gamesJson["games"].push_back(gameJson);
                 }
-                if(!*aborted) {
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end(gamesJson.dump());
-                }
+
+                uWSLoop->defer([aborted, res, gamesJson]() {
+                    if(!*aborted) {
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end(gamesJson.dump());
+                    }
+                });
             }
             else {
-                if(!*aborted) {
-                    res->writeHeader("Content-Type", "application/json");
-                    res->end("{games: {}}");
-                }
+                uWSLoop->defer([aborted, res]() {
+                    if(!*aborted) {
+                        res->writeHeader("Content-Type", "application/json");
+                        res->end("{games: {}}");
+                    }
+                });
             }
         } catch(std::exception& e) {
             std::cerr << "Error in game history: " << e.what() << std::endl;
-            if(!*aborted) {
-                res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
-            }
+
+            uWSLoop->defer([aborted, res]() {
+                if(!*aborted) {
+                    res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
+                }
+            });
         }
     });
 }
@@ -977,8 +1054,12 @@ void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* re
             pqxx::result r = txn.exec(pqxx::zview("SELECT id, joined_on FROM player WHERE user_name = $1"), pqxx::params(username));
 
             if(r.size() == 0) {
-                if(!*aborted)
-                    res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Player doesn't exist. Please check the username.");
+
+                uWSLoop->defer([aborted, res]() {
+                    if(!*aborted)
+                        res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Player doesn't exist. Please check the username.");
+                });
+
                 return;
             }
 
@@ -1027,15 +1108,21 @@ void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* re
                 profileJson["games"].push_back(gameJson);
             }
 
-            if(!*aborted){
-                res->writeHeader("Content-Type", "application/json");
-                res->end(profileJson.dump());
-            }
+            uWSLoop->defer([aborted, res, profileJson]() {
+                if(!*aborted){
+                    res->writeHeader("Content-Type", "application/json");
+                    res->end(profileJson.dump());
+                }
+            });
+
         } catch(std::exception& e) {
             std::cerr << "Error in player profile: " << e.what() << std::endl;
-            if(!*aborted) {
-                res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
-            }
+
+            uWSLoop->defer([aborted, res]() {
+                if(!*aborted) {
+                    res->writeStatus("500 Internal Server Error")->writeHeader("Content-Type", "text/plain")->end("Database error.");
+                }
+            });
         }
     });
 }
@@ -1075,8 +1162,12 @@ void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res,
                 pqxx::result gameResult = txn.exec(pqxx::zview("SELECT white_name, black_name, move_history, move_time_stamp, result, reason, created_at FROM game WHERE id = $1"), pqxx::params(gameID));
 
                 if(gameResult.size() == 0) {
-                    if(!*aborted)
-                        res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Requested game doesn't exist.");
+
+                    uWSLoop->defer([aborted, res]() {
+                        if(!*aborted)
+                            res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Requested game doesn't exist.");
+                    });
+
                     return;
                 }
 
@@ -1091,13 +1182,18 @@ void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res,
                 gameJson["reason"] = gameResult[0][5].as<std::string>();
                 gameJson["created_at"] = gameResult[0][6].as<std::string>();
 
-                if(!*aborted)
-                    res->writeHeader("Content-Type", "application/json")->end(gameJson.dump());
+                uWSLoop->defer([aborted, res, gameJson]() {
+                    if(!*aborted)
+                        res->writeHeader("Content-Type", "application/json")->end(gameJson.dump());
+                });
             }
             catch (std::exception& e) {
                 std::cout << "DB Error in fetching game: " << e.what() << '\n';
-                if(!*aborted)
-                    res->writeHeader("Content-Type", "text/plain")->writeStatus("500 Internal Server Error")->end("Something went wrong. Please try again later.");
+
+                uWSLoop->defer([aborted, res]() {
+                    if(!*aborted)
+                        res->writeHeader("Content-Type", "text/plain")->writeStatus("500 Internal Server Error")->end("Something went wrong. Please try again later.");
+                });
             }
         });
     }

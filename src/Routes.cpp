@@ -4,8 +4,10 @@
 #include <fstream>
 #include <iostream>
 
-void initRoutes(uWS::SSLApp & app) {
-    app.ws<PlayerData>("/new-game", {
+extern std::unique_ptr<uWS::SSLApp> app;
+
+void initRoutes() {
+    app->ws<PlayerDataPointer>("/new-game", {
         .upgrade = gameWSUpgradeHandler,
         .open = gameWSOpenHandler,
         .message = gameWSMessageHandler,
@@ -13,7 +15,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.ws<PlayerData>("/rand-game", {
+    app->ws<PlayerData>("/rand-game", {
         .open = [](auto * ws) {
             matchPlayer(ws->getUserData(), true);
         },
@@ -26,7 +28,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.ws<GameManagerPointer>("/watch", {
+    app->ws<GameManagerPointer>("/watch", {
         .upgrade = watchWSUpgradeHandler,
         .open = [](auto * ws) {
             GameManager* gameMngr = ws->getUserData()->pointer;
@@ -54,12 +56,8 @@ void initRoutes(uWS::SSLApp & app) {
             ss >> type;
 
             if(type == "chat") {
-                std::string chatJson;
-                ss >> chatJson;
 
-                GameManager* gameMngr = ws->getUserData()->pointer;
-
-                ws->publish(gameMngr->sGameID_, chatJson, uWS::OpCode::TEXT);
+                ws->publish(ws->getUserData()->topic, ss.str(), uWS::OpCode::TEXT);
             }
             else if(type == "rematch") {
                 std::string sGameID;
@@ -108,7 +106,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/api/user/status", [](auto *res, auto *req) {
+    app->get("/api/user/status", [](auto *res, auto *req) {
         // API ENDPOINT for dynamic data
         res->writeHeader("Content-Type", "application/json");
 
@@ -126,7 +124,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/*", [](auto *res, auto *req) {
+    app->get("/*", [](auto *res, auto *req) {
         // This is your CATCH-ALL ROUTE for serving static files
         std::string url = std::string(req->getUrl());
         std::string filePath;
@@ -146,7 +144,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/player/:username", [](auto * res, auto * req) {
+    app->get("/player/:username", [](auto * res, auto * req) {
         std::string_view name = req->getParameter("username");
         
         serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/profile.html", res);
@@ -154,7 +152,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/game/:id", [](auto * res, auto * req) {
+    app->get("/game/:id", [](auto * res, auto * req) {
 
         std::string sGameID(req->getParameter("id"));
 
@@ -214,14 +212,6 @@ void initRoutes(uWS::SSLApp & app) {
                 if(playersInGameIter != playersInGame.end()) {
                     auto * gameManager = playersInGameIter->second;
                     if(gameManager->gameID_ == gameID) {
-
-                        auto closedConnectionsIter = closedConnections.find(id);
-
-                        if(closedConnectionsIter == closedConnections.end()) {
-                            res->end("You are already playing in this game. Close the previous window and refresh to play here.");
-                            return;
-                        }
-
                         serveFile("/home/sivaganesh116/Workspace/ChessStrike/public/html/player.html", res);
                         res->end();
                     }
@@ -246,7 +236,7 @@ void initRoutes(uWS::SSLApp & app) {
         }
     });
 
-    app.post("/login", [](auto * res, auto * req) { 
+    app->post("/login", [](auto * res, auto * req) { 
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {
@@ -272,7 +262,7 @@ void initRoutes(uWS::SSLApp & app) {
         });
     });
 
-    app.get("/logout", [](auto *res, auto *req) {
+    app->get("/logout", [](auto *res, auto *req) {
         auto cookies = parseCookies(req->getHeader("cookie"));
         auto it = cookies.find("token");
 
@@ -294,7 +284,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.post("/signup", [](auto * res, auto * req) {
+    app->post("/signup", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {
@@ -326,7 +316,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/games", [](auto * res, auto * req) {
+    app->get("/games", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted](){
@@ -371,7 +361,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/live-games", [](auto * res, auto * req) {
+    app->get("/live-games", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {
@@ -390,7 +380,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/player-info/:username", [](auto * res, auto * req) {
+    app->get("/player-info/:username", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {
@@ -403,7 +393,7 @@ void initRoutes(uWS::SSLApp & app) {
     });
 
 
-    app.get("/live-game/:user_id", [](auto * res, auto * req) {
+    app->get("/live-game/:user_id", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {
@@ -419,7 +409,7 @@ void initRoutes(uWS::SSLApp & app) {
             res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Invalid user id to get live game");
     });
 
-    app.get("/game-info/:id", [](auto * res, auto * req) {
+    app->get("/game-info/:id", [](auto * res, auto * req) {
         std::shared_ptr<bool> aborted(new bool(false));
 
         res->onAborted([aborted]() {

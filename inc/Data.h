@@ -26,6 +26,7 @@ extern PostgresConnectionPool cPool;
 extern std::unordered_map<int, GameManager*> liveGames;
 extern std::unordered_map<int, GameManager*> playersInGame;
 extern std::unordered_map<int, PlayerData*> closedConnections;
+extern std::unique_ptr<uWS::SSLApp> app;
 
 using json = nlohmann::json;
 
@@ -60,12 +61,14 @@ private:
     void closeTimer();
 };
 
+struct PlayerDataPointer;
+
 struct PlayerData {
 public:
     std::string name_;
     int id_;
-    bool isWhite_, offeredDraw_, isMyTurn_;
-    uWS::WebSocket<true, true, PlayerData> *ws_, *otherWS_;
+    bool isWhite_, offeredDraw_, isMyTurn_, isConnected_;
+    uWS::WebSocket<true, true, PlayerDataPointer> *ws_, *otherWS_;
     std::unique_ptr<MoveTimer> moveTimer_;
     std::shared_ptr<LC::LegalChess> chess_;
     std::shared_ptr<GameManager> gameManager_;
@@ -78,6 +81,16 @@ public:
 
     void startAbandonTimer();
     void stopAbandonTimer();
+};
+
+struct PlayerDataPointer {
+public: 
+    PlayerDataPointer();
+    PlayerDataPointer(PlayerData* pd);
+    ~PlayerDataPointer();
+    PlayerDataPointer(PlayerDataPointer&& other);
+
+    PlayerData* playerData_;
 };
 
 struct GameManager {

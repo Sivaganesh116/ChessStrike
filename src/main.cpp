@@ -10,9 +10,11 @@
 
 #include "Controller.h"
 
-void initRoutes(uWS::SSLApp& app);
+void initRoutes();
 
+std::unique_ptr<uWS::SSLApp> app;
 std::shared_ptr<uv_loop_t> uv_loop = nullptr;
+uWS::Loop* uWSLoop;
 
 int main() {
     LC::compute();
@@ -21,17 +23,20 @@ int main() {
 
     if(!uv_loop) std::cout << "loop null\n";
 
-    uWS::Loop::get(uv_loop.get());
-    uWS::SSLApp app;
-    
-    initRoutes(app);
+    uWSLoop = uWS::Loop::get(uv_loop.get());
+    std::cout << uWS::Loop::get() << std::endl;
+    std::cout << uWSLoop << std::endl;
 
-    app.listen("0.0.0.0", 8080, [](auto * socket){
+    app = std::make_unique<uWS::SSLApp>();
+    
+    initRoutes();
+
+    app->listen("0.0.0.0", 8080, [](auto * socket){
         if(!socket) std::cout << "Couldn't start the sever\n";
         else std::cout << "Server running at port 8080\n";
     });
 
-    app.run();
+    app->run();
 
     return 0;
 }

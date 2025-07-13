@@ -4,7 +4,7 @@
 #include <fstream>
 #include <iostream>
 
-extern std::unique_ptr<uWS::SSLApp> app;
+extern std::unique_ptr<uWS::App> app;
 
 void initRoutes() {
     app->ws<PlayerDataPointer>("/new-game", {

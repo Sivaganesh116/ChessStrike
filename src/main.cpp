@@ -12,7 +12,7 @@
 
 void initRoutes();
 
-std::unique_ptr<uWS::SSLApp> app;
+std::unique_ptr<uWS::App> app;
 std::shared_ptr<uv_loop_t> uv_loop = nullptr;
 uWS::Loop* uWSLoop;
 
@@ -27,7 +27,7 @@ int main() {
     std::cout << uWS::Loop::get() << std::endl;
     std::cout << uWSLoop << std::endl;
 
-    app = std::make_unique<uWS::SSLApp>();
+    app = std::make_unique<uWS::App>();
     
     initRoutes();
 

@@ -29,7 +29,7 @@ std::unordered_map<int, GameManager*> liveGames;
 std::unordered_map<int, GameManager*> playersInGame;
 
 extern std::shared_ptr<uv_loop_t> uv_loop;
-extern std::unique_ptr<uWS::SSLApp> app;
+extern std::unique_ptr<uWS::App> app;
 extern uWS::Loop* uWSLoop;
 
 
@@ -56,7 +56,7 @@ std::string getMimeType(const std::string& path) {
 }
 
 
-void serveFile(std::string filePath, uWS::HttpResponse<true>* res) {
+void serveFile(std::string filePath, uWS::HttpResponse<false>* res) {
     // Try to open and read the file
     std::ifstream file(filePath, std::ios::binary);
     if (!file) {
@@ -294,7 +294,7 @@ std::pair<int, std::string> getUserNameIDFromToken(std::string token) {
 }
 
 
-void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req, struct us_socket_context_t * context) {
+void gameWSUpgradeHandler(uWS::HttpResponse<false> * res, uWS::HttpRequest * req, struct us_socket_context_t * context) {
     bool connectionAborted = false;
 
     res->onAborted([&connectionAborted]() {
@@ -366,7 +366,7 @@ void gameWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req,
 }
 
 
-void gameMoveHandler(uWS::WebSocket<true, true, PlayerDataPointer>* ws, PlayerData* movedPlayerData, std::string move) {
+void gameMoveHandler(uWS::WebSocket<false, true, PlayerDataPointer>* ws, PlayerData* movedPlayerData, std::string move) {
     auto & chess = movedPlayerData->chess_;
 
     try {
@@ -524,7 +524,7 @@ void rematch(PlayerData* p1, PlayerData* p2) {
 }
 
 
-void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerDataPointer>* ws, std::string_view msg, uWS::OpCode code) {
+void gameWSMessageHandler(uWS::WebSocket<false, true, PlayerDataPointer>* ws, std::string_view msg, uWS::OpCode code) {
     auto* movedPlayerData = ws->getUserData()->playerData_;
     auto * otherData = (movedPlayerData->gameManager_->whiteData_ == movedPlayerData ? movedPlayerData->gameManager_->blackData_ : movedPlayerData->gameManager_->whiteData_);
 
@@ -639,7 +639,7 @@ void gameWSMessageHandler(uWS::WebSocket<true, true, PlayerDataPointer>* ws, std
 }
 
 
-void gameWSOpenHandler(uWS::WebSocket<true, true, PlayerDataPointer> * ws) {
+void gameWSOpenHandler(uWS::WebSocket<false, true, PlayerDataPointer> * ws) {
     auto * newData = ws->getUserData()->playerData_;
 
     // if a reconnection is happening
@@ -710,7 +710,7 @@ void randGameMoveHandler(PlayerData* movedPlayerData, std::string move) {
     }
 }
 
-void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::string_view msg, uWS::OpCode code) {
+void randGameWSMessageHandler(uWS::WebSocket<false, true, PlayerData>* ws, std::string_view msg, uWS::OpCode code) {
     auto* movedPlayerData = ws->getUserData();
     auto* otherData = movedPlayerData->isWhite_ ? movedPlayerData->gameManager_->blackData_ : movedPlayerData->gameManager_->whiteData_;
 
@@ -802,7 +802,7 @@ void randGameWSMessageHandler(uWS::WebSocket<true, true, PlayerData>* ws, std::s
     }
 }
 
-void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerDataPointer> * ws, int code, std::string_view msg) {
+void gameWSCloseHandler(uWS::WebSocket<false, true, PlayerDataPointer> * ws, int code, std::string_view msg) {
     auto * playerData = ws->getUserData()->playerData_;
     playerData->isConnected_ = false;
 
@@ -846,7 +846,7 @@ void gameWSCloseHandler(uWS::WebSocket<true, true, PlayerDataPointer> * ws, int 
 } 
 
 
-void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, std::string_view body, bool isSignup) {
+void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<false>* res, std::string_view body, bool isSignup) {
     // Expecting body in format: username=<username>&password=<password>
     std::string bodyStr(body);
     std::unordered_map<std::string, std::string> form;
@@ -949,7 +949,7 @@ void handleSignupOrLogin(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>*
     });
 }
 
-void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int userID, int batchNumber, int numGames) {
+void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<false>* res, int userID, int batchNumber, int numGames) {
     tPool.submit([=]() {
         auto connHandle = cPool.acquire();
         pqxx::work txn{*connHandle->get()};
@@ -1018,7 +1018,7 @@ void gameHistoryHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* 
 }
 
 
-void getLiveGamesHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int numGames) {
+void getLiveGamesHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<false>* res, int numGames) {
     json liveGamesJson;
     liveGamesJson["games"] = json::array();
 
@@ -1040,7 +1040,7 @@ void getLiveGamesHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>*
     }
 }
 
-void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, std::string username) {
+void getPlayerProfile(std::shared_ptr<bool> aborted, uWS::HttpResponse<false>* res, std::string username) {
     if(username.length() == 0) {
         res->writeStatus("404 Not Found")->writeHeader("Content-Type", "text/plain")->end("Player doesn't exist. Please check the username.");
         return;
@@ -1144,7 +1144,7 @@ std::string getLiveGameOfUser(int userID) {
 
 
 // only for completed games
-void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res, int gameID, int reqUserID) {
+void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<false>* res, int gameID, int reqUserID) {
     auto liveGamesIT = liveGames.find(gameID);
         
     // if it is a live game
@@ -1200,7 +1200,7 @@ void getGameHandler(std::shared_ptr<bool> aborted, uWS::HttpResponse<true>* res,
 }
 
 
-void watchWSUpgradeHandler(uWS::HttpResponse<true> * res, uWS::HttpRequest * req, struct us_socket_context_t * context) {
+void watchWSUpgradeHandler(uWS::HttpResponse<false> * res, uWS::HttpRequest * req, struct us_socket_context_t * context) {
     bool connectionAborted = false;
 
     res->onAborted([&connectionAborted]() {
